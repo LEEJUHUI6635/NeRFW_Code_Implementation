@@ -1,8 +1,11 @@
+import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import os
 import cv2 as cv
+import torch.nn as nn
 import sys
+from PIL import Image, ImageDraw
 # Dataloader에서 ***bds_factor = 0.75***
 
 def normalize(x):
@@ -28,6 +31,7 @@ def new_origin(poses): # input -> poses[20, 3, 5], output -> average pose[3, 5]
     new_world = np.concatenate([new_world, hwf], axis=1)
     return new_world
 
+# appearance와 obstacle -> image에 추가
 class LLFF(object): # *** bd_factor를 추가해야 한다. ***
     def __init__(self, base_dir, factor, bd_factor=0.75): # bd_factor = 0.75로 고정
         self.base_dir = base_dir
@@ -37,6 +41,7 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
         self.load_images()
         self.pre_poses() # Test
         self.spiral_path() # Test
+        self.add_distortion()
         
     def preprocessing(self): # Q. colmap의 순서를 고려해야 하나?
         # poses_bounds.npy 파일에서 pose와 bds를 얻는다.
@@ -142,19 +147,73 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
             render_poses = np.concatenate([render_poses, hwf], axis=-1)
             render_poses_list.append(render_poses)
         self.render_poses = np.array(render_poses_list)
-        
+    
+    # seed 고정 -> image 별로 random seed는 달라야 한다.
+    # seed는 단순히 frame id -> 0 ~ 이미지 개수
+    def add_distortion(self): # train -> distorted images, test -> original images
+        image_dir = os.path.join(self.base_dir, 'images')
+        files = sorted([file for file in os.listdir(image_dir)]) # Q. colmap의 순서?
+        distorted_images_list = []
+        for idx, file in enumerate(files): # index를 단순히 random seed로 줄 수 있다.
+            np.random.seed(idx)
+            images_RGB = cv.imread(os.path.join(image_dir, file), flags=cv.IMREAD_COLOR) # RGB로 읽기
+            self.width = images_RGB.shape[1]
+            self.height = images_RGB.shape[0]
+            # appearance embedding
+            # normalize
+            images_norm = images_RGB // 255.0
+            scale = np.random.uniform(low=0.8, high=1.2, size=3)
+            bias = np.random.uniform(low=-0.2, high=0.2, size=3)
+            images_norm = np.clip(scale*images_norm+bias, 0, 1)
+            images_distorted = 255*np.uint8(images_norm)
+            
+            # transient embedding
+            # images_distorted numpy -> PIL
+            images_distorted = Image.fromarray(images_distorted)
+            draw = ImageDraw.Draw(images_distorted)
+            left = np.random.randint(self.width//4, self.width//2) # width의 1/4 ~ 1/2
+            top = np.random.randint(self.height//4, self.height//2) # height의 1/4 ~ 1/2
+            for i in range(10):
+                np.random.seed(10*idx+i)
+                random_color = tuple(np.random.choice(range(256), 3))
+                draw.rectangle(((left+self.width//40*i, top), (left+self.width//40*(i+1), top+self.width//4)), fill=random_color)
+            
+            # images_distorted PIL -> numpy
+            images_distorted = np.array(images_distorted)
+            images_resize = cv.resize(images_distorted, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서
+            images_resize = images_resize / 255 # normalization
+            distorted_images_list.append(images_resize)
+        self.distorted_images = np.array(distorted_images_list)
+
     def outputs(self):
         images = self.images.astype(np.float32)
+        distorted_images = self.distorted_images.astype(np.float32)
         poses = self.poses.astype(np.float32) # Test
         bds = self.bds # Test 
         render_poses = self.render_poses.astype(np.float32) # Test
         i_val = self.i_val # Test
         focal = self.focal
-        return images, poses, bds, render_poses, i_val, focal # focal length 추가해야 할 듯.
+        return images, distorted_images, poses, bds, render_poses, i_val, focal # focal length 추가해야 할 듯.
 
+# NeRF-W : rays_t -> 해당 ray가 어떠한 이미지에 속하는지에 대한 정보도 추가해야 한다.
 # poses <- poses : Train or Validation / poses <- render_poses : Test
-class Rays_DATASET(Dataset):
-    def __init__(self, height, width, intrinsic, poses, i_val, images, near=1.0, ndc_space=True, test=False, train=True): # pose -> [20, 3, 5] / Test
+class Rays_DATASET(Dataset): # parameter -> kwargs
+    def __init__(self, 
+                 height, 
+                 width, 
+                 intrinsic, 
+                 poses, 
+                 i_val, 
+                 images,
+                 distorted_images, 
+                 appearance_enbedding_word, 
+                 appearance_embedding_dim, 
+                 transient_embedding_word, 
+                 transient_embedding_dim, 
+                 near=1.0, 
+                 ndc_space=True, 
+                 test=False, 
+                 train=True): # pose -> [20, 3, 5] / Test
         super(Rays_DATASET, self).__init__()
         self.height = height
         self.width = width
@@ -162,28 +221,36 @@ class Rays_DATASET(Dataset):
         self.pose = poses[:,:,:4] # [?, 3, 4]
         self.i_val = i_val
         self.images = images
+        self.distorted_images = distorted_images
         self.near = near
         self.ndc_space = ndc_space
         self.test = test
         self.train = train
-    
+        # appearance embedding vector + trasient embedding vector
+        self.appearance_embedding_vector = nn.Embedding(appearance_enbedding_word, appearance_embedding_dim) # [1500, 48]
+        self.transient_embedding_vector = nn.Embedding(transient_embedding_word, transient_embedding_dim) # [1500, 16]
+        
+        # image 별로 index 설정 -> self.appearance_embedding_vector(rays_t의 값 = image frame id), self.transient_embedding_vector(rays_t의 값 = image frame id)
+        # rays_t = image frame id x torch.ones(image height x image width)
+        
         self.focal = self.intrinsic[0][0]
 
         self.image_num = self.pose.shape[0] # Train과 Test 모두에 사용된다.
         
         if self.test == False: # Train or Validation
-            train_idx = []
+            self.train_idx = []
             val_idx = []
             for i in range(self.image_num):
                 if i % self.i_val == 0:
                     val_idx.append(i) # [0, 12]
                     # print(val_idx) 
-                else:
-                    train_idx.append(i) # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19]
+                else: # image frame id
+                    self.train_idx.append(i) # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19]
         
             if self.train == True: # Train
-                self.pose = self.pose[train_idx,:,:]
-                self.images = self.images[train_idx,:,:,:]
+                self.pose = self.pose[self.train_idx,:,:]
+                # self.images = self.images[train_idx,:,:,:]
+                self.images = self.distorted_images[self.train_idx,:,:,:]
                 self.image_num = self.pose.shape[0]
                 
             elif self.train == False: # Validation
@@ -197,6 +264,9 @@ class Rays_DATASET(Dataset):
         elif self.ndc_space == True: # default -> LLFF dataloader
             self.all_rays() # view_dirs
             self.ndc_all_rays()
+        
+        # TODO : embedding vector를 추가할 것인가에 대한 flag 생성
+        self.embedding_vector()
         
         # train과 test의 차이는 train -> rays_o + rays_d + rays_rgb VS test -> rays_o + rays_d
         
@@ -252,6 +322,7 @@ class Rays_DATASET(Dataset):
 
         return rays
     
+    # TODO : 
     def all_rays(self): # 모든 image에 대한 rays -> rays_o + rays_d + rgb
         # rays + rgb -> [2, 378, 504, 3(x, y, -1)] + [1, 378, 504, 3(r, g, b)]
         # get_rays -> rays_o + rays_d
@@ -275,7 +346,7 @@ class Rays_DATASET(Dataset):
             self.rays_rgb_list_2 = [self.rays_rgb_list_2[i].reshape(2, 3) for i in range(len(self.rays_rgb_list_2))]
         self.view_dirs_list = [self.rays_rgb_list_2[i][1:2,:] for i in range(len(self.rays_rgb_list_2))]
         
-    def ndc_all_rays(self):
+    def ndc_all_rays(self): # ndc 처리
         rays_list = []
         for i in range(self.image_num):
             rays_o, rays_d = self.get_rays(self.pose[i,:3,:4])
@@ -289,10 +360,15 @@ class Rays_DATASET(Dataset):
         rays_arr = np.moveaxis(rays_arr, source=1, destination=3)
 
         if self.test == False:
-            rays_arr = rays_arr.reshape(-1, 3, 3)
-        else:
+            rays_arr = rays_arr.reshape(-1, 3, 3) # [3429216, 3, 3], 3429216 = 18 x 504 x 378
+        else: # self.test = True
             rays_arr = rays_arr.reshape(-1, 2, 3)
         self.rays_rgb_list = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
+    
+    def embedding_vector(self):
+        rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
+        rays_t_arr = torch.cat(rays_t_list, dim=0)
+        self.rays_t_list = [rays_t_arr[i] for i in range(len(rays_t_arr))] # list -> 시간 소요
         
     def __len__(self): # should be iterable
         return len(self.rays_rgb_list)
@@ -300,24 +376,63 @@ class Rays_DATASET(Dataset):
     def __getitem__(self, index): # should be iterable
         samples = self.rays_rgb_list[index]
         view_dirs = self.view_dirs_list[index] # Debugging -> test시에는 없다.
-        results = [samples, view_dirs]
+        rays_t = self.rays_t_list[index]
+        # rays_t 추가
+        results = [samples, view_dirs, rays_t]
         # return samples, view_dirs # rays_o + rays_d + rgb
         return results
 
 class Rays_DATALOADER(object):
-    def __init__(self, batch_size, height, width, intrinsic, poses, i_val, images, near, ndc_space, test, train, shuffle, drop_last):
+    def __init__(self, 
+                 batch_size, 
+                 height, 
+                 width, 
+                 intrinsic, 
+                 poses, 
+                 i_val, 
+                 images,
+                 distorted_images,
+                 appearance_embedding_word,
+                 appearance_embedding_dim,
+                 transient_embedding_word,
+                 transient_embedding_dim, 
+                 near, 
+                 ndc_space, 
+                 test, 
+                 train, 
+                 shuffle,
+                 drop_last): # parameter -> kwargs
         self.height = height
         self.width = width
         self.intrinsic = intrinsic
         self.poses = poses
         self.i_val = i_val
         self.images = images
+        self.distorted_images = distorted_images
+        self.appearance_embedding_word = appearance_embedding_word
+        self.appearance_embedding_dim = appearance_embedding_dim
+        self.transient_embedding_word = transient_embedding_word
+        self.transient_embedding_dim = transient_embedding_dim
         self.near = near # 1.0 -> default
         self.ndc_space = ndc_space
         self.test = test
         self.train = train
         self.batch_size = batch_size
-        self.results = Rays_DATASET(self.height, self.width, self.intrinsic, self.poses, self.i_val, self.images, self.near, self.ndc_space, self.test, self.train)
+        self.results = Rays_DATASET(self.height, 
+                                    self.width, 
+                                    self.intrinsic, 
+                                    self.poses, 
+                                    self.i_val, 
+                                    self.images,
+                                    self.distorted_images,
+                                    self.appearance_embedding_word, 
+                                    self.appearance_embedding_dim, 
+                                    self.transient_embedding_word, 
+                                    self.transient_embedding_dim, 
+                                    self.near, 
+                                    self.ndc_space,
+                                    self.test,
+                                    self.train)
         self.shuffle = shuffle # 나중에 train이면 shuffle = True / validation 혹은 test이면 shuffle = False 되게끔 만들기 !
         self.drop_last = drop_last # 나중에 train이면 drop_last = True / validation 혹은 test이면 drop_last = False 되게끔 만들기 !
         

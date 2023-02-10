@@ -9,6 +9,7 @@ import cv2 as cv
 import os
 import time
 import tqdm
+import sys
 # train 할 때에는 random하게 ray를 섞어야 하기 때문에, ray를 합쳐 하나의 image로 만드는 작업 -> 하나의 함수
 # learning rate decay -> iteration이 한 번씩 돌 때마다
 
@@ -59,9 +60,15 @@ class Solver(object):
         self.L_dirs = config.L_dirs # 4
         self.learning_rate = config.learning_rate
         
+        # appearance embedding vector, transient embedding vector
+        self.appearance_embedding_word = config.appearance_embedding_word
+        self.transient_embedding_word = config.transient_embedding_word
+        self.appearance_channel = config.appearance_embedding_dim
+        self.transient_channel = config.transient_embedding_dim
+        
         # pts_channel, output_channel, dir_channel 설정
         self.pts_channel = 3 + 2 * self.L_pts * 3 # 3 + 2 x 10 x 3
-        self.output_channel = 4
+        self.output_channel = 9 # static rgb + static density + uncertainty + transient rgb + transient density
         self.dir_channel = 3 + 2 * self.L_dirs * 3 # 3 + 2 x 4 x 3
         
         # save path
@@ -82,14 +89,18 @@ class Solver(object):
     
     # 고민 : optimizer가 학습할 parameter -> 한 번에 이렇게 학습해도 되나?
     def basic_setting(self): # Q. 2개의 network를 학습?
+        # TODO : 학습해야 하는 appearance embedding vector + transient embedding vector
+        self.appearance_embedding_vector = torch.nn.Embedding(self.appearance_embedding_word, self.appearance_channel)
+        self.transient_embedding_vector = torch.nn.Embedding(self.transient_embedding_word, self.transient_channel)
+        
         # model -> Coarse + Fine
         # Coarse + Fine Network
         # 고민 -> 두 개의 network가 아니라 한 개의 network를 학습해야 하는 것이 아닌가? 즉, forward 부분도 하나로 통일해야 gradient가 한 번에 학습되는 것이 아닌가?
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
         # self.coarse_model = NeRF().to(self.device)
         grad_variables = list(self.coarse_model.parameters())
-        self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
         # self.fine_model = NeRF().to(self.device)
         grad_variables += list(self.fine_model.parameters())
         
@@ -99,13 +110,25 @@ class Solver(object):
         # check -> optimizer를 출력해보면 된다.
         
         # loss function
-        self.criterion = lambda x, y : torch.mean((x - y) ** 2)
+        # coarse -> 기존의 NeRF와 동일, coarse color loss function
+        # fine -> fine color loss function, uncertainty loss function, transient density function
+        # coarse color loss function
+        self.coarse_color_loss = lambda x, y : torch.mean((x - y) ** 2)
+        # fine color loss function
+        self.fine_color_loss = lambda x, y, z : torch.mean((x - y) ** 2 / pow(z, 2))
+        # uncertainty loss function
+        self.uncertainty_loss = lambda z : torch.mean(pow(torch.log(z)))
+        # transient density loss function
+        self.transient_density_loss = lambda r : torch.mean() # r -> transient density
         
         # evaluation metric -> PSNR
         self.psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]).to(self.device))
 
     # Classic Volume Rendering -> rays_d = rays_d
     def classic_volume_rendering(self, raw, z_vals, rays, device): # input -> Network의 outputs [1024, 64, 4] + z_vals / output -> 2D color [1024, 3] -> rgb
+        # coarse -> 기존의 NeRF와 동일, static rgb + static density
+        
+        # fine -> static rgb + static density + uncertainty + transient rgb + transient density
         rays_d = rays[:,1:2,:]        
         raw = raw.to(self.device)
         z_vals = z_vals.to(self.device)
@@ -151,7 +174,7 @@ class Solver(object):
         for epoch in tqdm.tqdm(range(start_iters, self.nb_epochs)):
             # Dataloader -> 1024로 나눠 학습
             self.train_image_list = []
-            for idx, [rays, view_dirs] in enumerate(tqdm.tqdm(self.data_loader)): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
+            for idx, [rays, view_dirs, rays_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
             # for idx, [rays, view_dirs] in enumerate(self.data_loader):
                 rays = rays.float()
                 view_dirs = view_dirs.float()
@@ -162,11 +185,12 @@ class Solver(object):
                 rays_d = rays[:,1,:]
                 rays_rgb = rays[:,2,:] # True
 
+                # Coarse model -> 기존 NeRF와 동일
                 # Stratified Sampling -> rays_o + rays_d -> view_dirs x
                 pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
                 pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num, [1024, 64, 3]
                 coarse_view_dirs = view_dirs[:,None].expand(pts.shape) # [1024, 64, 3]
-                pts = pts.reshape(-1, 3) # [65536, 3]
+                pts = pts.reshape(-1, 3) # [65536, 3], 65536 = 1024 x 64
                 coarse_view_dirs = coarse_view_dirs.reshape(-1, 3)
                 
                 # Positional Encoding
@@ -175,15 +199,30 @@ class Solver(object):
                 coarse_pts = coarse_pts.to(self.device)
                 coarse_view_dirs = coarse_view_dirs.to(self.device)
 
-                inputs = torch.cat([coarse_pts, coarse_view_dirs], dim=-1)
-                inputs = inputs.to(self.device)
+                # Appearance embedding + Transient embedding
+                appearance_embedded = self.appearance_embedding_vector(rays_t) # [1024, 48]
+                appearance_embedded = appearance_embedded.reshape(batch_size, 1, self.appearance_channel)
+                appearance_embedded = appearance_embedded.repeat(1, self.coarse_num, 1) # [1024, 64, 48]
+                appearance_embedded = appearance_embedded.reshape(-1, self.appearance_channel).to(self.device)
+                transient_embedded = self.transient_embedding_vector(rays_t) # [1024, 16]
+                transient_embedded = transient_embedded.reshape(batch_size, 1, self.transient_channel)
+                transient_embedded = transient_embedded.repeat(1, self.coarse_num, 1)
+                transient_embedded = transient_embedded.reshape(-1, self.transient_channel).to(self.device)
                 
+                # input -> pts + viewing_dirs + appearance embedding vector + transient embedding vector
+                inputs = torch.cat([coarse_pts, coarse_view_dirs, appearance_embedded, transient_embedded], dim=-1)
+                inputs = inputs.to(self.device)
+                # print(inputs.shape) # [65536, 154], 154 = 63 + 27 + 48 + 16
+    
                 # Coarse Network
+                # debugging
                 outputs = self.coarse_model(inputs, sampling='coarse')
                 # outputs = self.coarse_model(inputs)
-                outputs = outputs.reshape(batch_size, self.coarse_num, 4) # rgb + density
+                outputs = outputs.reshape(batch_size, self.coarse_num, 9) # rgb + density
                 rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
                 
+                # Fine model -> model input(pts, view_dirs, ?), model output(static rgb + static density + uncertainty + transient rgb + transient density), classic volume rendering(static + transient),
+                # loss function
                 # Hierarchical sampling + viewing_directions
                 fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
                 fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3] -> [1024, self.coarse_num + self.fine_num, 3]
@@ -197,19 +236,34 @@ class Solver(object):
                 fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
                 fine_pts = fine_pts.to(self.device)
                 fine_view_dirs = fine_view_dirs.to(self.device)
-                fine_inputs = torch.cat([fine_pts, fine_view_dirs], dim=-1)
+                
+                # Appearance embedding + Transient embedding
+                appearance_fine_embedded = self.appearance_embedding_vector(rays_t)
+                appearance_fine_embedded = appearance_embedded.reshape(batch_size, 1, self.appearance_channel)
+                appearance_fine_embedded = appearance_embedded.repeat(1, self.coarse_num, 1) # [1024, 64, 48]
+                appearance_fine_embedded = appearance_embedded.reshape(-1, self.appearance_channel).to(self.device)
+                
+                transient_fine_embedded = self.transient_embedding_vector(rays_t) # [1024, 16]
+                transient_fine_embedded = transient_embedded.reshape(batch_size, 1, self.transient_channel)
+                transient_fine_embedded = transient_embedded.repeat(1, self.coarse_num, 1)
+                transient_fine_embedded = transient_embedded.reshape(-1, self.transient_channel).to(self.device)
+
+                # input -> pts + viewing_dirs + appearance embedding vector + transient embedding vector
+                fine_inputs = torch.cat([fine_pts, fine_view_dirs, appearance_fine_embedded, transient_fine_embedded], dim=-1)
                 fine_inputs = fine_inputs.to(self.device)
                 
                 # Fine model
                 fine_outputs = self.fine_model(fine_inputs, sampling='fine')
                 # fine_outputs = self.fine_model(fine_inputs)
-                fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 4) # 128 = self.coarse_num + self.fine_num
+                fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 9) # 128 = self.coarse_num + self.fine_num
 
                 # classic volume rendering
                 fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
                 fine_rgb_2d = fine_rgb_2d.to(self.device)
                 rgb_2d = rgb_2d.to(self.device)
                 rays_rgb = rays_rgb.to(self.device)
+                
+                # loss -> coarse color loss func + fine color loss func + 
                 loss = self.criterion(fine_rgb_2d, rays_rgb) + self.criterion(rgb_2d, rays_rgb) # Coarse + Fine
                 
                 # optimizer

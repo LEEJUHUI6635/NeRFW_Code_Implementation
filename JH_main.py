@@ -38,6 +38,12 @@ parser.add_argument('--L_dirs', type=int, default=4)
 parser.add_argument('--learning_rate', type=int, default=5e-4) # learning rate = 5e-4
 parser.add_argument('--sample_num', type=int, default=64)
 
+# NeRF-W -> appearance embedding vector의 단어 수, 차원, transient embedding vector의 단어 수, 차원
+parser.add_argument('--appearance_embedding_word', type=int, default=1500)
+parser.add_argument('--appearance_embedding_dim', type=int, default=48)
+parser.add_argument('--transient_embedding_word', type=int, default=1500)
+parser.add_argument('--transient_embedding_dim', type=int, default=16)
+
 # save path
 parser.add_argument('--save_results_path', type=str, default='results/')
 parser.add_argument('--save_train_path', type=str, default='results/val/')
@@ -62,7 +68,7 @@ if not os.path.exists(config.save_fine_path):
     os.makedirs(config.save_fine_path)
 
 # Dataset preprocessing
-images, poses, bds, render_poses, i_val, focal = LLFF(config.base_dir, config.factor).outputs() # focal도 추출
+images, distorted_images, poses, bds, render_poses, i_val, focal = LLFF(config.base_dir, config.factor).outputs() # focal도 추출
 
 # 하나의 함수로 묶을까?
 # 아래의 것들은 JH_data_loader에 넣어버린다. -> 안 넣어도 될 듯.
@@ -80,12 +86,65 @@ near = 1. # const처럼 만들기
 
 # Train -> data_loader + val_data_loader만 키고, Test -> test_data_loader만 키자. -> for 시간 단축
 # Train data loader -> shuffle = True / Validation data loader -> shuffle = False
+        
 if config.mode == 'Train':
     # tqdm
-    data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True, shuffle=True, drop_last=False).data_loader() # Train
+    data_loader = Rays_DATALOADER(config.batch_size, 
+                                  height, 
+                                  width, 
+                                  intrinsic, 
+                                  poses,
+                                  i_val, 
+                                  images,
+                                  distorted_images,
+                                  config.appearance_embedding_word,
+                                  config.appearance_embedding_dim,
+                                  config.transient_embedding_word,
+                                  config.transient_embedding_dim,
+                                  near,
+                                  config.ndc_space, 
+                                  False, 
+                                  True, 
+                                  shuffle=True, 
+                                  drop_last=False).data_loader() # Train
     # data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True, shuffle=True, drop_last=False) # Train -> tqdm
-    val_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, False, shuffle=False, drop_last=False).data_loader() # Validation
+    val_data_loader = Rays_DATALOADER(config.batch_size, 
+                                      height,
+                                      width, 
+                                      intrinsic,
+                                      poses, 
+                                      i_val, 
+                                      images,
+                                      distorted_images,
+                                      config.appearance_embedding_word,
+                                      config.appearance_embedding_dim,
+                                      config.transient_embedding_word,
+                                      config.transient_embedding_dim, 
+                                      near,
+                                      config.ndc_space, 
+                                      False, 
+                                      False, 
+                                      shuffle=False, 
+                                      drop_last=False).data_loader() # Validation
     Solver(data_loader, val_data_loader, None, config, i_val, height, width).train()
+    
 elif config.mode == 'Test':
-    test_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, render_poses, None, None, near, config.ndc_space, test=True, train=False, shuffle=False, drop_last=False).data_loader() # Test
+    test_data_loader = Rays_DATALOADER(config.batch_size, 
+                                       height, 
+                                       width, 
+                                       intrinsic,
+                                       render_poses,
+                                       None, 
+                                       None, 
+                                       None,
+                                       config.appearance_embedding_word,
+                                       config.appearance_embedding_dim,
+                                       config.transient_embedding_word,
+                                       config.transient_embedding_dim,
+                                       near, 
+                                       config.ndc_space, 
+                                       test=True,
+                                       train=False, 
+                                       shuffle=False, 
+                                       drop_last=False).data_loader() # Test
     Solver(None, None, test_data_loader, config, None, height, width).test()

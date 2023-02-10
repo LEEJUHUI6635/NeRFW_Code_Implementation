@@ -1,7 +1,9 @@
+from re import S
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import sys
 
 class Stratified_Sampling(object):
     def __init__(self, rays_o, view_dirs, batch_size, sample_num, near, far, device):
@@ -119,179 +121,133 @@ class Hierarchical_Sampling(object):
 # input_channel = 3 / output_channel = 4
 # *****Viewing direction -> optional하게 만들기*****
 # model -> sample_num 따로 빼기 or forward() -> Coarse or Fine option
+# appearance embedding -> 48, transient embedding -> 16
+# self.output_channel = 9
+# appearance embedding vector -> 이미지 별로 한 개
+# static rgb -> sigmoid
+# static density -> softplus
+# transient rgb -> sigmoid
+# transient density -> softplus
+# uncertainty -> softplus
 class NeRF(nn.Module):
-    def __init__(self, pts_channel, output_channel, dir_channel, batch_size, sample_num, device):
+    def __init__(self, pts_channel, output_channel, dir_channel, appearance_channel, transient_channel, batch_size, sample_num, device):
         super(NeRF, self).__init__()
         self.pts_channel = pts_channel # [x, y, z] points -> 63
-        self.output_channel = output_channel # rgb + density
+        self.output_channel = output_channel # 9 = static_rgb + static_density + uncertainty + transient_rgb + transient_density
         self.hidden_channel = 256 
         self.hidden2_channel = 128      
         self.dir_channel = dir_channel # viewing direction -> 27
+        # appearance embedding + transient embedding
+        self.appearance_channel = appearance_channel # 48
+        self.transient_channel = transient_channel # 16
         
         self.batch_size = batch_size # 1024
         self.sample_num = sample_num # 64
         self.device = device
         
-        # forward에서 쓰일 함수들
-        self.density_outputs = nn.Linear(self.hidden_channel, 1) # [256, 1]
-        self.feature_outputs = nn.Linear(self.hidden_channel, self.hidden_channel) # [256, 256]
-        self.rgb_outputs = nn.Linear(self.hidden2_channel, 3) # [128, 3]
+        # static rgb + static density + uncertainty + transient rgb + transient density
+        self.static_rgb_outputs = nn.Sequential(nn.Linear(self.hidden2_channel, 3), nn.Sigmoid()) # [128, 3]
+        self.static_density_outputs = nn.Sequential(nn.Linear(self.hidden_channel, 1), nn.Softplus()) # [256, 1]
+        self.uncertainty_outputs = nn.Sequential(nn.Linear(self.hidden2_channel, 1), nn.Softplus()) # [128, 1]
+        self.transient_rgb_outputs = nn.Sequential(nn.Linear(self.hidden2_channel, 3), nn.Sigmoid()) # [128, 3]
+        self.transient_density_outputs = nn.Sequential(nn.Linear(self.hidden2_channel, 1), nn.Softplus()) # [128, 1]
         
-        # forward에서 쓰일 block들 
+        # forward에서 쓰일 block들
+        # position input을 받는 network
+        # appearance embedding input과 viewing direction input을 받는 network
+        # transient embedding input을 받는 network
         self.residual()
-        self.density()
-        self.rgb()
-        
+        self.main()
+        self.appearance()
+        self.transient()
+    
+    # skip connection
     def residual(self):
+        # residual learning
+        # [63, 256] -> [256, 256] -> [256, 256] -> [256, 256]
         self.residual_list = []
         self.residual_list.append(nn.Linear(in_features=self.pts_channel, out_features=self.hidden_channel)) # [63, 256]
-        self.residual_list.append(nn.ReLU())
-        
-        for i in range(4):
-            self.residual_list.append(nn.Linear(in_features=self.hidden_channel, out_features=self.hidden_channel)) # [256, 256]
-            self.residual_list.append(nn.ReLU())
-            
-        # residual learning
-        # [3, 256] -> [256, 256] -> [256, 256] -> [256, 256]
+        self.residual_list.append(nn.ReLU(inplace=True))
+        for i in range(3):
+            self.residual_list.append(nn.Linear(in_features=self.hidden_channel, out_features=self.hidden_channel))
+            self.residual_list.append(nn.ReLU(inplace=True))
         self.residual_block = nn.Sequential(*self.residual_list)
-        
-    def density(self): # output -> density + 256 차원의 feature vector
-        self.density_list = []
-        self.density_list.append(nn.Linear(in_features=self.pts_channel+self.hidden_channel, out_features=self.hidden_channel)) # [63+256, 256]
-        self.density_list.append(nn.ReLU())
-        for i in range(3): # Q. 하나의 layer를 더 추가해야 하나?
-            self.density_list.append(nn.Linear(in_features=self.hidden_channel, out_features=self.hidden_channel)) # [256, 256]
-            self.density_list.append(nn.ReLU())
-            
-        # density 출력하는 network
-        # [256 + 3, 256] -> [256, 256] -> [256, 256] -> [256, 256]
-
-        self.density_block = nn.Sequential(*self.density_list)
-        # output -> 256 channel의 feature space + channel 1의 density
-        
-    def rgb(self):
-        self.rgb_list = []
-        self.rgb_list.append(nn.Linear(in_features=self.dir_channel+self.hidden_channel, out_features=self.hidden_channel)) # [27+256, 256]
-        self.rgb_list.append(nn.ReLU())
-        self.rgb_list.append(nn.Linear(in_features=self.hidden_channel, out_features=self.hidden2_channel)) # [256, 128]
-
-        # rgb 출력하는 network
-        # [256 + 3, 256] -> [256, 128]
-        # output -> 3 channel의 rgb
-        self.rgb_block = nn.Sequential(*self.rgb_list)
     
+    def main(self):
+        self.main_list = []
+        self.main_list.append(nn.Linear(in_features=self.pts_channel+self.hidden_channel, out_features=self.hidden_channel))
+        self.main_list.append(nn.ReLU(inplace=True))
+        for i in range(4):
+            self.main_list.append(nn.Linear(in_features=self.hidden_channel, out_features=self.hidden_channel))
+            self.main_list.append(nn.ReLU(inplace=True))
+        self.main_block = nn.Sequential(*self.main_list)
+        
+    def appearance(self):
+        self.appearance_list = []
+        self.appearance_list.append(nn.Linear(self.appearance_channel + self.dir_channel + self.hidden_channel, self.hidden2_channel)) # 48 + 27 + 256
+        self.appearance_list.append(nn.ReLU(inplace=True))
+        self.appearance_block = nn.Sequential(*self.appearance_list)
+        
+    def transient(self):
+        self.transient_list = []
+        self.transient_list.append(nn.Linear(self.hidden_channel + self.transient_channel, self.hidden2_channel)) # 256 + 16
+        self.transient_list.append(nn.ReLU(inplace=True))
+        for i in range(3):
+            self.transient_list.append(nn.Linear(self.hidden2_channel, self.hidden2_channel))
+            self.transient_list.append(nn.ReLU(inplace=True))
+        self.transient_block = nn.Sequential(*self.transient_list)
+        
     def forward(self, x, sampling): # forward() : gradient의 학습을 결정 -> coarse와 fine을 한 개로 통일해야 한다.
-        # coarse -> [65536, 90] / fine -> [131072, 90]
+        # coarse -> [65536, 90] = [1024 x 64, 63 + 27] / fine -> [131072, 90] = [1024 x 128, 63 + 27]
+        # input -> pts + viewing_dirs + appearance embedding vector + transient embedding vector
+        # coarse -> [65536, 154] = [1024 x 64, 63 + 27 + 48 + 16] / fine -> [131072, 154] = [1024 x 128, 63 + 27 + 48 + 16]
         if sampling.lower() == 'coarse':
             sample_num = 64 # 변수로 치환
         elif sampling.lower() == 'fine':
             sample_num = 128 # 변수로 치환
-            
-        pts = x[:,:self.pts_channel]
-        dirs = x[:,self.pts_channel:self.pts_channel+self.dir_channel]
-        feature = self.residual_block(pts)
-        feature = torch.cat([pts, feature], dim=1)
-        feature2 = self.density_block(feature)
-        density_outputs = self.density_outputs(feature2)
-        feature_outputs = self.feature_outputs(feature2)
-        feature3 = torch.cat([feature_outputs, dirs], dim=1)
-        feature4 = self.rgb_block(feature3)
-        rgb_outputs = self.rgb_outputs(feature4)
-        outputs = torch.cat([rgb_outputs, density_outputs], dim=1)
-        outputs = outputs.reshape([x.shape[0] // sample_num, sample_num, self.output_channel]) # [1024, 64, 4]
+        
+        # input -> pts, dirs, appearance embedding vector, transient embedding vector
+        pts = x[:,:self.pts_channel] # 63
+        acc_channel = self.pts_channel
+        dirs = x[:,acc_channel:acc_channel+self.dir_channel] # 27
+        acc_channel += self.dir_channel
+        appearance_embedding = x[:,acc_channel:acc_channel+self.appearance_channel] # 48
+        acc_channel += self.appearance_channel
+        transient_embedding = x[:,acc_channel:]
+        
+        # residual learning
+        feature = self.residual_block(pts) # [65536, 256]
+        feature = torch.cat([pts, feature], dim=1) # [65536, 63 + 256]
+        feature2 = self.main_block(feature) # [65536, 256]
+        # appearance block의 input
+        # debugging
+        appearance_input = torch.cat([appearance_embedding, dirs, feature2], dim=1)
+        # print(appearance_input.shape) # [65536, 331], 331 = 48 + 27 + 256
+        feature3 = self.appearance_block(appearance_input)
+        static_rgb_outputs = self.static_rgb_outputs(feature3)
+
+        # static density
+        static_density_outputs = self.static_density_outputs(feature2) # [65536, 3]
+        
+        # transient block의 input
+        transient_input = torch.cat([transient_embedding, feature2], dim=1)
+        # print(transient_input.shape) # [65536, 272], 272 = 256 + 16
+        feature4 = self.transient_block(transient_input)
+
+        # uncertainty
+        uncertainty_outputs = self.uncertainty_outputs(feature4)
+        # transient rgb
+        transient_rgb_outputs = self.transient_rgb_outputs(feature4)
+        # transient density
+        transient_density_outputs = self.transient_density_outputs(feature4)
+        
+        # static + transient
+        static_outputs = torch.cat([static_rgb_outputs, static_density_outputs], dim=1)
+        transient_outputs = torch.cat([transient_rgb_outputs, transient_density_outputs, uncertainty_outputs], dim=1)
+        # print(static_outputs.shape) # [65536, 4]
+        # print(transient_outputs.shape) # [65536, 5]
+
+        outputs = torch.cat([static_outputs, transient_outputs], dim=1) # [65536, 9], 9 = 3 + 1 + 3 + 1 + 1
+        outputs = outputs.reshape([x.shape[0] // sample_num, sample_num, self.output_channel]) # [1024, 64, 9]
         
         return outputs
-
-# # Model
-# class NeRF(nn.Module):
-#     def __init__(self, D=8, W=256, input_ch=63, input_ch_views=27, output_ch=4, skips=[4], use_viewdirs=True): # use_viewdirs = True
-#         """
-#         """
-#         super(NeRF, self).__init__()
-#         self.D = D # 8 -> density를 뽑기 전 block의 개수
-#         self.W = W # 256 -> node의 개수
-#         self.input_ch = input_ch # 3 -> position [x, y, z]
-#         self.input_ch_views = input_ch_views # 3 -> viewing direction [X, Y, Z] Cartesian unit vector
-#         self.skips = skips # [4] for residual term
-#         self.use_viewdirs = use_viewdirs # 실제 train -> True
-        
-#         # nn.ModuleList : nn.Sequential과 비슷하게, nn.Module의 list를 input으로 받는다. 하지만 nn.Sequential과 다르게 forward() method가 없다.
-
-#         self.pts_linears = nn.ModuleList(
-#             [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)]) # 7
-#             # i = 0, 1, 2, ..., 6 만일 i = 4 -> nn.Linear(256 + 3, 256)
-#             # [3, 256] + [256, 256] + [256, 256] + [256, 256] + [256, 256] + [256 + 3, 256](skip connection) + [256, 256] + [256, 256] 
-
-#         ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
-
-#         self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)]) # [256 + 3, 128]
-        
-#         # [3 + 256, 128] -> direction + feature space
-
-#         ### Implementation according to the paper
-#         # self.views_linears = nn.ModuleList(
-#         #     [nn.Linear(input_ch_views + W, W//2)] + [nn.Linear(W//2, W//2) for i in range(D//2)])
-        
-#         if use_viewdirs: # viewing direction을 중간에 투입
-#             self.feature_linear = nn.Linear(W, W) # [256, 256]
-#             self.alpha_linear = nn.Linear(W, 1) # [256, 1] -> density 출력
-#             self.rgb_linear = nn.Linear(W//2, 3) # [128, 3] -> RGB 출력
-#         else:
-#             self.output_linear = nn.Linear(W, output_ch) # viewing direction을 쓰지 않는다면, [256, 1+3] 한 번에 density와 RGB 출력
-
-#     def forward(self, x):
-#         # print(x.shape) # [65536, 90]
-#         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1) # tensor를 [self.input_ch, input_ch_views] size로 나누기
-#         # input을 position과 viewing direction으로 나누기
-#         h = input_pts # position
-#         for i, l in enumerate(self.pts_linears):
-#             h = self.pts_linears[i](h) # [256, 256]
-#             h = F.relu(h)
-#             if i in self.skips: # i = 4
-#                 h = torch.cat([input_pts, h], -1) # skip connection -> dimension 합침
-
-#         if self.use_viewdirs: # viewing direction = True
-#             alpha = self.alpha_linear(h) # density 추출
-#             feature = self.feature_linear(h) # feature vector 추출
-#             h = torch.cat([feature, input_views], -1) # feature + viewing direction
-        
-#             for i, l in enumerate(self.views_linears):
-#                 h = self.views_linears[i](h)
-#                 h = F.relu(h)
-
-#             rgb = self.rgb_linear(h)
-#             outputs = torch.cat([rgb, alpha], -1) # outputs = rgb color + density
-#         else:
-#             outputs = self.output_linear(h)
-#         # print(outputs.shape)
-#         return outputs
-
-#     # self.use_viewdirs = True
-#     def load_weights_from_keras(self, weights):
-#         assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
-#         # assert [조건], [오류메시지] -> 조건 = True : 그대로 코드 진행, 조건 = False : 오류메시지 발생
-#         # Load pts_linears
-#         for i in range(self.D): # 8
-#             idx_pts_linears = 2 * i # 0, 2, 4, 6, 8
-#             self.pts_linears[i].weight.data = torch.from_numpy(np.transpose(weights[idx_pts_linears]))
-#             self.pts_linears[i].bias.data = torch.from_numpy(np.transpose(weights[idx_pts_linears+1]))
-        
-#         # Load feature_linear
-#         idx_feature_linear = 2 * self.D # 2 * 8
-#         self.feature_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_feature_linear]))
-#         self.feature_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_feature_linear+1]))
-
-#         # Load views_linears
-#         idx_views_linears = 2 * self.D + 2
-#         self.views_linears[0].weight.data = torch.from_numpy(np.transpose(weights[idx_views_linears]))
-#         self.views_linears[0].bias.data = torch.from_numpy(np.transpose(weights[idx_views_linears+1]))
-
-#         # Load rgb_linear
-#         idx_rbg_linear = 2 * self.D + 4
-#         self.rgb_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear]))
-#         self.rgb_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear+1]))
-
-#         # Load alpha_linear
-#         idx_alpha_linear = 2 * self.D + 6
-#         self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
-#         self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
