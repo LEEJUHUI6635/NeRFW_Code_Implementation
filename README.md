@@ -1,1 +1,1 @@
-# [Study] NeRF Code Implementation
+# [Study] NeRFW Code Implementation
