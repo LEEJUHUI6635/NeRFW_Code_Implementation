@@ -90,6 +90,7 @@ class Solver(object):
     # 고민 : optimizer가 학습할 parameter -> 한 번에 이렇게 학습해도 되나?
     def basic_setting(self): # Q. 2개의 network를 학습?
         # TODO : 학습해야 하는 appearance embedding vector + transient embedding vector
+        # TODO : coarse model만 먼저 학습해보기 -> Debugging
         self.appearance_embedding_vector = torch.nn.Embedding(self.appearance_embedding_word, self.appearance_channel)
         self.transient_embedding_vector = torch.nn.Embedding(self.transient_embedding_word, self.transient_channel)
         
@@ -100,9 +101,10 @@ class Solver(object):
         self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
         # self.coarse_model = NeRF().to(self.device)
         grad_variables = list(self.coarse_model.parameters())
-        self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
-        # self.fine_model = NeRF().to(self.device)
-        grad_variables += list(self.fine_model.parameters())
+        
+        # self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        # # self.fine_model = NeRF().to(self.device)
+        # grad_variables += list(self.fine_model.parameters())
         
         # optimizer
         self.optimizer = optim.Adam(params=grad_variables, lr=self.learning_rate, betas=(0.9, 0.999))
@@ -113,46 +115,117 @@ class Solver(object):
         # coarse -> 기존의 NeRF와 동일, coarse color loss function
         # fine -> fine color loss function, uncertainty loss function, transient density function
         # coarse color loss function
-        self.coarse_color_loss = lambda x, y : torch.mean((x - y) ** 2)
+        self.coarse_color_loss = lambda x, y : 0.5 * torch.mean((x - y) ** 2)
         # fine color loss function
-        self.fine_color_loss = lambda x, y, z : torch.mean((x - y) ** 2 / pow(z, 2))
+        self.fine_color_loss = lambda x, y, z : 0.5 * torch.mean((x - y) ** 2 / z ** 2)
         # uncertainty loss function
-        self.uncertainty_loss = lambda z : torch.mean(pow(torch.log(z)))
+        self.uncertainty_loss = lambda z : 3 + torch.mean((torch.log(z)) ** 2) # positive
         # transient density loss function
-        self.transient_density_loss = lambda r : torch.mean() # r -> transient density
+        self.transient_density_loss = lambda r : torch.mean(0.01 * r) # r -> transient density
         
         # evaluation metric -> PSNR
         self.psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]).to(self.device))
 
-    # Classic Volume Rendering -> rays_d = rays_d
-    def classic_volume_rendering(self, raw, z_vals, rays, device): # input -> Network의 outputs [1024, 64, 4] + z_vals / output -> 2D color [1024, 3] -> rgb
-        # coarse -> 기존의 NeRF와 동일, static rgb + static density
+    # TODO : train과 test 구별하여 코드 구현, coarse와 fine 또한 구별
+    # Classic Volume Rendering
+    # self.classic_volume_rendering(outputs, z_vals, rays, self.device)
+    def classic_volume_rendering(self, sampling, raw, z_vals, rays, device): # input -> Network의 outputs [1024, 64, 4] + z_vals / output -> 2D color [1024, 3] -> rgb
+        # TODO : coarse model만을 고려한 classic volume rendering + uncertainty rendering
+        # if sampling.lower() == 'coarse': # 기존 NeRF와 동일
+        #     rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
+        #     raw = raw.to(self.device)
+        #     z_vals = z_vals.to(self.device)
+        #     rays = rays.to(self.device)
+        #     rays_d = rays_d.to(self.device)
+        #     rgb_3d = torch.sigmoid(raw[:,:,:3]) # [1024, 64, 3]
+        #     rgb_3d = rgb_3d.to(self.device)
+        #     density = raw[:,:,3:4] # [1024, 64, 1]
+        #     density = density.to(self.device)
+        #     dists = z_vals[:,1:] - z_vals[:,:-1] # [1024, 63]
+        #     dists = dists.to(device)
+        #     # print(dists.shape) # [1024, 63]
+        #     dists = torch.cat([dists, (torch.Tensor([1e10]).expand(dists.shape[0], 1)).to(self.device)], dim=-1)
+        #     # print(dists.shape) # [1024, 64]
+        #     dists = dists * torch.norm(rays_d, dim=-1)
+        #     # print(dists.shape) # [1024, 64]
+        #     dists = dists.to(self.device)
+        #     active_func = nn.ReLU()
+        #     noise = torch.randn_like(dists)
+        #     noise = noise.to(self.device)
+        #     alpha = 1 - torch.exp(-active_func((density.squeeze() + noise) * dists))
+        #     # torch.cumprod([a, b, c, d, e]) = [a, a*b, a*b*c, a*b*c*d, a*b*c*d*e]
+        #     transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
+        #     weights = alpha * transmittance
+        #     # print(weights.shape) # [1024, 64]
+        #     rgb_2d = torch.sum(weights[...,None] * rgb_3d, dim=-2)
+        #     # print(rgb_2d.shape) # [1024, 3]
+        #     return rgb_2d, weights
         
-        # fine -> static rgb + static density + uncertainty + transient rgb + transient density
-        rays_d = rays[:,1:2,:]        
-        raw = raw.to(self.device)
-        z_vals = z_vals.to(self.device)
-        rays = rays.to(self.device)
-        rays_d = rays_d.to(self.device)
-        rgb_3d = torch.sigmoid(raw[:,:,:3])
-        rgb_3d = rgb_3d.to(self.device)
-        density = raw[:,:,3:]
-        density = density.to(self.device)
-        dists = z_vals[:,1:] - z_vals[:,:-1] # [1024, 128]
-        dists = dists.to(device)
-        dists = torch.cat([dists, (torch.Tensor([1e10]).expand(dists.shape[0], 1)).to(self.device)], dim=-1)
-
-        dists = dists * torch.norm(rays_d, dim=-1)
-        dists = dists.to(self.device)
-        active_func = nn.ReLU()
-        noise = torch.randn_like(dists)
-        noise = noise.to(self.device)
-        alpha = 1 - torch.exp(-active_func((density.squeeze() + noise) * dists))
-        transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
-        weights = alpha * transmittance
-        
-        rgb_2d = torch.sum(weights[...,None] * rgb_3d, dim=-2)
-        return rgb_2d, weights
+        if sampling.lower() == 'coarse':
+            rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
+            raw = raw.to(self.device) # [static_rgb_outputs, static_density_outputs, uncertainty_outputs, transient_rgb_outputs, transient_density_outputs]
+            z_vals = z_vals.to(self.device)
+            rays = rays.to(self.device)
+            rays_d = rays_d.to(self.device)
+            
+            # static
+            static_rgb_3d = torch.sigmoid(raw[:,:,:3]) # [1024, 64, 3]
+            static_rgb_3d = static_rgb_3d.to(self.device)
+            static_density = raw[:,:,3:4] # [1024, 64, 1]
+            static_density = static_density.to(self.device)
+            
+            # transient 
+            transient_rgb_3d = torch.sigmoid(raw[:,:,5:8]) # [1024, 64, 3]
+            transient_rgb_3d = transient_rgb_3d.to(self.device)
+            transient_density = raw[:,:,8:] # [1024, 64, 1]
+            transient_density = transient_density.to(self.device)
+            uncertainty = raw[:,:,4:5] # [1024, 64, 1]
+            uncertainty = uncertainty.to(self.device)
+            
+            dists = z_vals[:,1:] - z_vals[:,:-1] # [1024, 63]
+            dists = dists.to(device)
+            # print(dists.shape) # [1024, 63]
+            dists = torch.cat([dists, (torch.Tensor([1e10]).expand(dists.shape[0], 1)).to(self.device)], dim=-1)
+            # print(dists.shape) # [1024, 64]
+            dists = dists * torch.norm(rays_d, dim=-1)
+            # print(dists.shape) # [1024, 64]
+            dists = dists.to(self.device)
+            active_func = nn.ReLU()
+            noise = torch.randn_like(dists)
+            noise = noise.to(self.device)
+            
+            # static
+            static_alpha = 1 - torch.exp(-active_func((static_density.squeeze() + noise) * dists))
+            
+            # transient
+            transient_alpha = 1 - torch.exp(-active_func((transient_density.squeeze() + noise) * dists))
+            
+            # static + transient
+            alpha = 1 - torch.exp(-active_func((static_density.squeeze() + transient_density.squeeze() + noise) * dists))
+            transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
+            
+            # static
+            static_weights = static_alpha * transmittance
+            
+            # transient
+            transient_weights = transient_alpha * transmittance
+            
+            # static + transient
+            weights = alpha * transmittance
+            
+            # static 
+            static_rgb_2d = torch.sum(static_weights[...,None] * static_rgb_3d, dim=-2)
+            # transient
+            transient_rgb_2d = torch.sum(transient_weights[...,None] * transient_rgb_3d, dim=-2)
+            # static + transient
+            rgb_2d = static_rgb_2d + transient_rgb_2d
+            
+            # uncertainty
+            # print((transient_weights * uncertainty.squeeze()).shape) # [1024, 64]
+            beta = torch.sum(transient_weights * uncertainty.squeeze(), dim=1) + 0.03
+            # print(beta.shape) # [1024]
+            
+            return rgb_2d, weights, beta
     
     # *****net_chunk*****
     def train(self): # device -> dataset, model
@@ -173,7 +246,7 @@ class Solver(object):
         # for epoch in range(start_iters, self.nb_epochs):
         for epoch in tqdm.tqdm(range(start_iters, self.nb_epochs)):
             # Dataloader -> 1024로 나눠 학습
-            self.train_image_list = []
+            s = 0
             for idx, [rays, view_dirs, rays_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
             # for idx, [rays, view_dirs] in enumerate(self.data_loader):
                 rays = rays.float()
@@ -213,58 +286,87 @@ class Solver(object):
                 inputs = torch.cat([coarse_pts, coarse_view_dirs, appearance_embedded, transient_embedded], dim=-1)
                 inputs = inputs.to(self.device)
                 # print(inputs.shape) # [65536, 154], 154 = 63 + 27 + 48 + 16
-    
+
                 # Coarse Network
                 # debugging
                 outputs = self.coarse_model(inputs, sampling='coarse')
                 # outputs = self.coarse_model(inputs)
                 outputs = outputs.reshape(batch_size, self.coarse_num, 9) # rgb + density
-                rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
-                
-                # Fine model -> model input(pts, view_dirs, ?), model output(static rgb + static density + uncertainty + transient rgb + transient density), classic volume rendering(static + transient),
-                # loss function
-                # Hierarchical sampling + viewing_directions
-                fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
-                fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3] -> [1024, self.coarse_num + self.fine_num, 3]
-                
-                fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
-                fine_pts = fine_pts.reshape(-1, 3)
-                fine_view_dirs = fine_view_dirs.reshape(-1, 3)
-                
-                # Positional Encoding
-                fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
-                fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
-                fine_pts = fine_pts.to(self.device)
-                fine_view_dirs = fine_view_dirs.to(self.device)
-                
-                # Appearance embedding + Transient embedding
-                appearance_fine_embedded = self.appearance_embedding_vector(rays_t)
-                appearance_fine_embedded = appearance_embedded.reshape(batch_size, 1, self.appearance_channel)
-                appearance_fine_embedded = appearance_embedded.repeat(1, self.coarse_num, 1) # [1024, 64, 48]
-                appearance_fine_embedded = appearance_embedded.reshape(-1, self.appearance_channel).to(self.device)
-                
-                transient_fine_embedded = self.transient_embedding_vector(rays_t) # [1024, 16]
-                transient_fine_embedded = transient_embedded.reshape(batch_size, 1, self.transient_channel)
-                transient_fine_embedded = transient_embedded.repeat(1, self.coarse_num, 1)
-                transient_fine_embedded = transient_embedded.reshape(-1, self.transient_channel).to(self.device)
-
-                # input -> pts + viewing_dirs + appearance embedding vector + transient embedding vector
-                fine_inputs = torch.cat([fine_pts, fine_view_dirs, appearance_fine_embedded, transient_fine_embedded], dim=-1)
-                fine_inputs = fine_inputs.to(self.device)
-                
-                # Fine model
-                fine_outputs = self.fine_model(fine_inputs, sampling='fine')
-                # fine_outputs = self.fine_model(fine_inputs)
-                fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 9) # 128 = self.coarse_num + self.fine_num
-
-                # classic volume rendering
-                fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
-                fine_rgb_2d = fine_rgb_2d.to(self.device)
+                # print(outputs.shape) # [1024, 64, 9]
+                transient_density = outputs[:,:,8:]
+                # classic volume rendering -> transient part 추가
+                rgb_2d, weights, beta = self.classic_volume_rendering('coarse', outputs, z_vals, rays, self.device)
                 rgb_2d = rgb_2d.to(self.device)
+                beta = beta.to(self.device)
+                transient_density = transient_density.to(self.device)
                 rays_rgb = rays_rgb.to(self.device)
+                # # Fine model -> model input(pts, view_dirs, ?), model output(static rgb + static density + uncertainty + transient rgb + transient density), classic volume rendering(static + transient),
+                # # loss function
+                # # Hierarchical sampling + viewing_directions
+                # fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
+                # fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3] -> [1024, self.coarse_num + self.fine_num, 3]
                 
-                # loss -> coarse color loss func + fine color loss func + 
-                loss = self.criterion(fine_rgb_2d, rays_rgb) + self.criterion(rgb_2d, rays_rgb) # Coarse + Fine
+                # fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
+                # fine_pts = fine_pts.reshape(-1, 3)
+                # fine_view_dirs = fine_view_dirs.reshape(-1, 3)
+                
+                # # Positional Encoding
+                # fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
+                # fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
+                # fine_pts = fine_pts.to(self.device)
+                # fine_view_dirs = fine_view_dirs.to(self.device)
+                
+                # # Appearance embedding + Transient embedding
+                # appearance_fine_embedded = self.appearance_embedding_vector(rays_t)
+                # appearance_fine_embedded = appearance_fine_embedded.reshape(batch_size, 1, self.appearance_channel)
+                # appearance_fine_embedded = appearance_fine_embedded.repeat(1, self.coarse_num + self.fine_num, 1) # [1024, 64, 48]
+                # appearance_fine_embedded = appearance_fine_embedded.reshape(-1, self.appearance_channel).to(self.device)
+                
+                # transient_fine_embedded = self.transient_embedding_vector(rays_t) # [1024, 16]
+                # transient_fine_embedded = transient_fine_embedded.reshape(batch_size, 1, self.transient_channel)
+                # transient_fine_embedded = transient_fine_embedded.repeat(1, self.coarse_num + self.fine_num, 1)
+                # transient_fine_embedded = transient_fine_embedded.reshape(-1, self.transient_channel).to(self.device)
+
+                # # input -> pts + viewing_dirs + appearance embedding vector + transient embedding vector
+                # fine_inputs = torch.cat([fine_pts, fine_view_dirs, appearance_fine_embedded, transient_fine_embedded], dim=-1)
+                # fine_inputs = fine_inputs.to(self.device)
+                
+                # # Fine model
+                # fine_outputs = self.fine_model(fine_inputs, sampling='fine')
+                # # fine_outputs = self.fine_model(fine_inputs)
+                # fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 9) # 128 = self.coarse_num + self.fine_num
+                
+                # # debugging
+                # fine_outputs = fine_outputs[:,:,:4]
+                # # classic volume rendering
+                # # fine_rgb_2d, static_rgb_2d, transient_rgb_2d, fine_weights, static_weights, transient_weights, beta = \
+                # #     self.classic_volume_rendering('fine', fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
+                # fine_rgb_2d, fine_weights = \
+                #     self.classic_volume_rendering('coarse', fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
+                # fine_rgb_2d = fine_rgb_2d.to(self.device)
+                # rgb_2d = rgb_2d.to(self.device)
+                # rays_rgb = rays_rgb.to(self.device)
+                
+                # # output -> uncertainty + transient density
+                # transient_density = fine_outputs[:,:,8:]
+                # # TODO : rays_rgb -> GT가 될 것인가? 어떠한 image가 될 것인가?
+                # # loss = coarse color loss function + fine color loss function + uncertainty loss function + transient density loss function
+                
+                
+                # debugging
+                # beta = torch.sum(beta, dim=1)
+                # beta = beta.unsqueeze(dim=1)
+                beta = beta.unsqueeze(dim=1)
+                loss = self.fine_color_loss(rgb_2d, rays_rgb, beta) + self.uncertainty_loss(beta) + self.transient_density_loss(transient_density)
+                
+                # # coarse color loss function
+                # self.coarse_color_loss = lambda x, y : torch.mean((x - y) ** 2)
+                # # fine color loss function
+                # self.fine_color_loss = lambda x, y, z : torch.mean((x - y) ** 2 / pow(z, 2))
+                # # uncertainty loss function
+                # self.uncertainty_loss = lambda z : 3 + torch.mean(pow(torch.log(z))) # positive
+                # # transient density loss function
+                # self.transient_density_loss = lambda r : torch.mean(0.01 * r) # r -> transient density
                 
                 # optimizer
                 self.optimizer.zero_grad()
@@ -274,96 +376,114 @@ class Solver(object):
                 psnr = self.psnr(loss) # psnr 조금 수정해야 할 듯.
                 # print(rays.shape) # [1024, 3, 3]
                 # iteration n번 마다 출력
+                print(idx, loss)
+                # print(fine_rgb_2d.shape) # [1024, 3]
+                if idx == 0:
+                    train_image_arr = rgb_2d
+                elif idx != 0 and train_image_arr.shape[0] <= self.height * self.width:
+                    train_image_arr = torch.cat([train_image_arr, rgb_2d], dim=0)
                 
+                if s == 0 and train_image_arr.shape[0] >= self.height * self.width:    
+                    train_image_list = [train_image_arr[i:i+1,:] for i in range(self.height * self.width)]
+                    train_image_arr = torch.cat(train_image_list, dim=0)
+                    train_image = train_image_arr.reshape(self.height, self.width, 3)
+                    train_image = train_image * 255.0
+                    train_image = np.array(train_image.detach().cpu())
+                    cv.imwrite('./results/train/train_image_{}.png'.format(epoch), train_image)
+                    s += 1
+            
+            print('one epoch passed!')
+            
+            
+
             # 한 epoch가 지날 때마다,
             print(idx, loss, psnr)
             print('----{}s seconds----'.format(time.time() - start_time))
             
             # Learning rate decay -> self.optimizer에도 적용되어야 한다.
-            # epoch마다
             decay_rate = 0.1
             decay_steps = 250 * 1000
             new_lrate = self.learning_rate * (decay_rate ** (epoch / decay_steps))
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = new_lrate
 
-            # 한 epoch마다 model, optimizer 저장 -> 15 epoch마다
-            # Save_Checkpoints -> 하나로 합치기
-            if epoch % self.save_model_iters == 0 and epoch > 0: 
-            # if epoch % 1 == 0 and epoch > 0:
-                Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
-                Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
+            # # 한 epoch마다 model, optimizer 저장 -> 15 epoch마다
+            # # Save_Checkpoints -> 하나로 합치기
+            # if epoch % self.save_model_iters == 0 and epoch > 0: 
+            # # if epoch % 1 == 0 and epoch > 0:
+            #     Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
+            #     Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
             
-            # Validation -> Validataion Dataloader = rays + NDC space 전에 추출한 get_rays의 view_dirs -> Train과 똑같이 처리한다. 다만, rays_rgb는 가져올 필요 없다.
-            if epoch % self.save_val_iters == 0 and epoch > 0: # if epoch % 10 == 0 and epoch > 0:
-            # if epoch % 1 == 0 and epoch > 0:
-                with torch.no_grad():
-                    val_image_list = []
-                    for idx, [rays, view_dirs] in enumerate(tqdm.tqdm(self.val_data_loader)): # rays + view_dirs
-                        batch_size = rays.shape[0]
-                        # view_dirs -> NDC 처리 전의 get_rays로부터
-                        view_dirs = viewing_directions(view_dirs) # [1024, 3]
-                        rays_o = rays[:,0,:]
-                        rays_d = rays[:,1,:]
-                        rays_rgb = rays[:,2,:] # True
+            # # Validation -> Validataion Dataloader = rays + NDC space 전에 추출한 get_rays의 view_dirs -> Train과 똑같이 처리한다. 다만, rays_rgb는 가져올 필요 없다.
+            # if epoch % self.save_val_iters == 0 and epoch > 0: # if epoch % 10 == 0 and epoch > 0:
+            # # if epoch % 1 == 0 and epoch > 0:
+            #     with torch.no_grad():
+            #         val_image_list = []
+            #         for idx, [rays, view_dirs] in enumerate(tqdm.tqdm(self.val_data_loader)): # rays + view_dirs
+            #             batch_size = rays.shape[0]
+            #             # view_dirs -> NDC 처리 전의 get_rays로부터
+            #             view_dirs = viewing_directions(view_dirs) # [1024, 3]
+            #             rays_o = rays[:,0,:]
+            #             rays_d = rays[:,1,:]
+            #             rays_rgb = rays[:,2,:] # True
                         
-                        # Stratified Sampling -> rays_o + rays_d -> view_dirs x
-                        pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
-                        pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num
-                        coarse_view_dirs = view_dirs[:,None].expand(pts.shape) # [1024, 64, 3]
-                        pts = pts.reshape(-1, 3)
-                        coarse_view_dirs = coarse_view_dirs.reshape(-1, 3)
+            #             # Stratified Sampling -> rays_o + rays_d -> view_dirs x
+            #             pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
+            #             pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num
+            #             coarse_view_dirs = view_dirs[:,None].expand(pts.shape) # [1024, 64, 3]
+            #             pts = pts.reshape(-1, 3)
+            #             coarse_view_dirs = coarse_view_dirs.reshape(-1, 3)
                         
-                        # Positional Encoding
-                        coarse_pts = Positional_Encoding(self.L_pts).outputs(pts) # position
-                        coarse_view_dirs = Positional_Encoding(self.L_dirs).outputs(coarse_view_dirs) # viewing direction
-                        coarse_pts = coarse_pts.to(self.device)
-                        coarse_view_dirs = coarse_view_dirs.to(self.device)
+            #             # Positional Encoding
+            #             coarse_pts = Positional_Encoding(self.L_pts).outputs(pts) # position
+            #             coarse_view_dirs = Positional_Encoding(self.L_dirs).outputs(coarse_view_dirs) # viewing direction
+            #             coarse_pts = coarse_pts.to(self.device)
+            #             coarse_view_dirs = coarse_view_dirs.to(self.device)
 
-                        inputs = torch.cat([coarse_pts, coarse_view_dirs], dim=-1)
-                        inputs = inputs.to(self.device)
+            #             inputs = torch.cat([coarse_pts, coarse_view_dirs], dim=-1)
+            #             inputs = inputs.to(self.device)
                         
-                        # Coarse Network
-                        outputs = self.coarse_model(inputs, sampling='coarse')
-                        # outputs = self.coarse_model(inputs)
-                        outputs = outputs.reshape(batch_size, self.coarse_num, 4)
-                        rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
+            #             # Coarse Network
+            #             outputs = self.coarse_model(inputs, sampling='coarse')
+            #             # outputs = self.coarse_model(inputs)
+            #             outputs = outputs.reshape(batch_size, self.coarse_num, 4)
+            #             rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
                         
-                        # Hierarchical sampling + viewing_directions
-                        fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
-                        fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3] -> 128 = self.coarse_num + self.fine_num
+            #             # Hierarchical sampling + viewing_directions
+            #             fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
+            #             fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3] -> 128 = self.coarse_num + self.fine_num
                         
-                        fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
-                        fine_pts = fine_pts.reshape(-1, 3)
-                        fine_view_dirs = fine_view_dirs.reshape(-1, 3)
+            #             fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
+            #             fine_pts = fine_pts.reshape(-1, 3)
+            #             fine_view_dirs = fine_view_dirs.reshape(-1, 3)
                         
-                        # Positional Encoding
-                        fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
-                        fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
-                        fine_pts = fine_pts.to(self.device)
-                        fine_view_dirs = fine_view_dirs.to(self.device)
-                        fine_inputs = torch.cat([fine_pts, fine_view_dirs], dim=-1)
-                        fine_inputs = fine_inputs.to(self.device)
+            #             # Positional Encoding
+            #             fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
+            #             fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
+            #             fine_pts = fine_pts.to(self.device)
+            #             fine_view_dirs = fine_view_dirs.to(self.device)
+            #             fine_inputs = torch.cat([fine_pts, fine_view_dirs], dim=-1)
+            #             fine_inputs = fine_inputs.to(self.device)
                         
-                        # Fine model
-                        fine_outputs = self.fine_model(fine_inputs, sampling='fine')
-                        # fine_outputs = self.fine_model(fine_inputs)
-                        fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 4) # 128 = self.coarse_num + self.fine_num
+            #             # Fine model
+            #             fine_outputs = self.fine_model(fine_inputs, sampling='fine')
+            #             # fine_outputs = self.fine_model(fine_inputs)
+            #             fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 4) # 128 = self.coarse_num + self.fine_num
 
-                        # classic volume rendering
-                        fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
-                        fine_rgb_2d = fine_rgb_2d.to(self.device)
-                        # print(fine_rgb_2d.shape) # [1024, 3]
-                        fine_rgb_2d = fine_rgb_2d.cpu().detach().numpy()
-                        fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
-                        val_image_list.append(fine_rgb_2d)
+            #             # classic volume rendering
+            #             fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
+            #             fine_rgb_2d = fine_rgb_2d.to(self.device)
+            #             # print(fine_rgb_2d.shape) # [1024, 3]
+            #             fine_rgb_2d = fine_rgb_2d.cpu().detach().numpy()
+            #             fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
+            #             val_image_list.append(fine_rgb_2d)
                         
-                    val_image_arr = np.concatenate(val_image_list, axis=0)
-                    val_image_arr = val_image_arr.reshape(2, self.height, self.width, 3) # validation image 개수만큼 -> flexible
-                    for i in range(2): # 2 -> flexible
-                        image = val_image_arr[i,:,:,:]
-                        # cv.imwrite('./results/val/{}_{}.png'.format(epoch, i), image)
-                        cv.imwrite(os.path.join(self.save_train_path, 'validation_epoch_{}_{}.png'.format(epoch, i)), image)
+            #         val_image_arr = np.concatenate(val_image_list, axis=0)
+            #         val_image_arr = val_image_arr.reshape(2, self.height, self.width, 3) # validation image 개수만큼 -> flexible
+            #         for i in range(2): # 2 -> flexible
+            #             image = val_image_arr[i,:,:,:]
+            #             # cv.imwrite('./results/val/{}_{}.png'.format(epoch, i), image)
+            #             cv.imwrite(os.path.join(self.save_train_path, 'validation_epoch_{}_{}.png'.format(epoch, i)), image)
     
     def test(self):
         # render_only -> model checkpoints 가져오기

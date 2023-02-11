@@ -14,7 +14,7 @@ cudnn.deterministic = True # ?
 cudnn.benchmark = True # For fast training 
 
 # Paser
-parser = argparse.ArgumentParser(description='NeRF Implementation by JH')
+parser = argparse.ArgumentParser(description='NeRF-W Implementation by JH')
 
 # LLFF
 parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/fern')
@@ -39,6 +39,8 @@ parser.add_argument('--learning_rate', type=int, default=5e-4) # learning rate =
 parser.add_argument('--sample_num', type=int, default=64)
 
 # NeRF-W -> appearance embedding vector의 단어 수, 차원, transient embedding vector의 단어 수, 차원
+parser.add_argument('--appearance_embedded', type=bool, default=True)
+parser.add_argument('--transient_embedded', type=bool, default=True)
 parser.add_argument('--appearance_embedding_word', type=int, default=1500)
 parser.add_argument('--appearance_embedding_dim', type=int, default=48)
 parser.add_argument('--transient_embedding_word', type=int, default=1500)
@@ -68,7 +70,7 @@ if not os.path.exists(config.save_fine_path):
     os.makedirs(config.save_fine_path)
 
 # Dataset preprocessing
-images, distorted_images, poses, bds, render_poses, i_val, focal = LLFF(config.base_dir, config.factor).outputs() # focal도 추출
+images, poses, bds, render_poses, i_val, focal = LLFF(config.base_dir, config.factor, config.appearance_embedded, config.transient_embedded).outputs() # focal도 추출
 
 # 하나의 함수로 묶을까?
 # 아래의 것들은 JH_data_loader에 넣어버린다. -> 안 넣어도 될 듯.
@@ -86,7 +88,6 @@ near = 1. # const처럼 만들기
 
 # Train -> data_loader + val_data_loader만 키고, Test -> test_data_loader만 키자. -> for 시간 단축
 # Train data loader -> shuffle = True / Validation data loader -> shuffle = False
-        
 if config.mode == 'Train':
     # tqdm
     data_loader = Rays_DATALOADER(config.batch_size, 
@@ -96,16 +97,11 @@ if config.mode == 'Train':
                                   poses,
                                   i_val, 
                                   images,
-                                  distorted_images,
-                                  config.appearance_embedding_word,
-                                  config.appearance_embedding_dim,
-                                  config.transient_embedding_word,
-                                  config.transient_embedding_dim,
                                   near,
                                   config.ndc_space, 
                                   False, 
                                   True, 
-                                  shuffle=True, 
+                                  shuffle=False, 
                                   drop_last=False).data_loader() # Train
     # data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True, shuffle=True, drop_last=False) # Train -> tqdm
     val_data_loader = Rays_DATALOADER(config.batch_size, 
@@ -115,11 +111,6 @@ if config.mode == 'Train':
                                       poses, 
                                       i_val, 
                                       images,
-                                      distorted_images,
-                                      config.appearance_embedding_word,
-                                      config.appearance_embedding_dim,
-                                      config.transient_embedding_word,
-                                      config.transient_embedding_dim, 
                                       near,
                                       config.ndc_space, 
                                       False, 
@@ -136,11 +127,6 @@ elif config.mode == 'Test':
                                        render_poses,
                                        None, 
                                        None, 
-                                       None,
-                                       config.appearance_embedding_word,
-                                       config.appearance_embedding_dim,
-                                       config.transient_embedding_word,
-                                       config.transient_embedding_dim,
                                        near, 
                                        config.ndc_space, 
                                        test=True,

@@ -33,15 +33,16 @@ def new_origin(poses): # input -> poses[20, 3, 5], output -> average pose[3, 5]
 
 # appearance와 obstacle -> image에 추가
 class LLFF(object): # *** bd_factor를 추가해야 한다. ***
-    def __init__(self, base_dir, factor, bd_factor=0.75): # bd_factor = 0.75로 고정
+    def __init__(self, base_dir, factor, bd_factor=0.75, appearance_embedded = True, transient_embedded = True): # bd_factor = 0.75로 고정
         self.base_dir = base_dir
         self.factor = factor
         self.bd_factor = bd_factor # ***
+        self.appearance_embedded = appearance_embedded
+        self.transient_embedded = transient_embedded
         self.preprocessing() # Test
-        self.load_images()
+        self.load_images() # appearance embedding x, transient embedding x
         self.pre_poses() # Test
         self.spiral_path() # Test
-        self.add_distortion()
         
     def preprocessing(self): # Q. colmap의 순서를 고려해야 하나?
         # poses_bounds.npy 파일에서 pose와 bds를 얻는다.
@@ -56,15 +57,44 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
         image_dir = os.path.join(self.base_dir, 'images')
         files = sorted([file for file in os.listdir(image_dir)]) # Q. colmap의 순서?
         images_list = []
-        for file in files:
+        for idx, file in enumerate(files):
             images_RGB = cv.imread(os.path.join(image_dir, file), flags=cv.IMREAD_COLOR) # RGB로 읽기
             self.width = images_RGB.shape[1]
             self.height = images_RGB.shape[0]
-            images_resize = cv.resize(images_RGB, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서 
-            images_resize = images_resize / 255 # normalization
-            images_list.append(images_resize)
+            if self.appearance_embedded == False and self.transient_embedded == False:
+                # appearance_embedded = False and transient_embedded = False
+                images_resize = cv.resize(images_RGB, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서 
+                images_norm = images_resize / 255 # normalization
+                images_list.append(images_norm)
+            # appearance embedding + transient embedding
+            elif self.appearance_embedded == True and self.transient_embedded == True:
+                np.random.seed(idx) # image에 따른 random seed
+                # appearance embedding
+                # normalize
+                images_norm = images_RGB / 255 # normalization
+                scale = np.random.uniform(low=0.8, high=1.2, size=3)
+                bias = np.random.uniform(low=-0.2, high=0.2, size=3)
+                images_norm = np.clip(scale*images_norm+bias, 0, 1)
+                images_distorted = np.uint8(255*images_norm)
+
+                # transient embedding
+                # images_distorted numpy -> PIL
+                images_distorted = Image.fromarray(images_distorted)
+                draw = ImageDraw.Draw(images_distorted)
+                left = np.random.randint(self.width//4, self.width//2) # width의 1/4 ~ 1/2
+                top = np.random.randint(self.height//4, self.height//2) # height의 1/4 ~ 1/2
+                for i in range(10):
+                    np.random.seed(10*idx+i)
+                    random_color = tuple(np.random.choice(range(256), 3))
+                    draw.rectangle(((left+self.width//40*i, top), (left+self.width//40*(i+1), top+self.width//4)), fill=random_color) # user parameter
+            
+                # images_distorted PIL -> numpy
+                images_distorted = np.array(images_distorted)
+                images_resize = cv.resize(images_distorted, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서
+                images_resize = images_resize / 255 # normalization
+                images_list.append(images_resize)        
         self.images = np.array(images_list)
-    
+        
     def pre_poses(self): # bds_factor에 대해 rescale을 처리해야 한다.
         # 좌표축 변환, [-u, r, -t] -> [r, u, -t]
         sc = 1. if self.bd_factor is None else 1./(self.bds.min() * self.bd_factor)
@@ -147,53 +177,15 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
             render_poses = np.concatenate([render_poses, hwf], axis=-1)
             render_poses_list.append(render_poses)
         self.render_poses = np.array(render_poses_list)
-    
-    # seed 고정 -> image 별로 random seed는 달라야 한다.
-    # seed는 단순히 frame id -> 0 ~ 이미지 개수
-    def add_distortion(self): # train -> distorted images, test -> original images
-        image_dir = os.path.join(self.base_dir, 'images')
-        files = sorted([file for file in os.listdir(image_dir)]) # Q. colmap의 순서?
-        distorted_images_list = []
-        for idx, file in enumerate(files): # index를 단순히 random seed로 줄 수 있다.
-            np.random.seed(idx)
-            images_RGB = cv.imread(os.path.join(image_dir, file), flags=cv.IMREAD_COLOR) # RGB로 읽기
-            self.width = images_RGB.shape[1]
-            self.height = images_RGB.shape[0]
-            # appearance embedding
-            # normalize
-            images_norm = images_RGB // 255.0
-            scale = np.random.uniform(low=0.8, high=1.2, size=3)
-            bias = np.random.uniform(low=-0.2, high=0.2, size=3)
-            images_norm = np.clip(scale*images_norm+bias, 0, 1)
-            images_distorted = 255*np.uint8(images_norm)
-            
-            # transient embedding
-            # images_distorted numpy -> PIL
-            images_distorted = Image.fromarray(images_distorted)
-            draw = ImageDraw.Draw(images_distorted)
-            left = np.random.randint(self.width//4, self.width//2) # width의 1/4 ~ 1/2
-            top = np.random.randint(self.height//4, self.height//2) # height의 1/4 ~ 1/2
-            for i in range(10):
-                np.random.seed(10*idx+i)
-                random_color = tuple(np.random.choice(range(256), 3))
-                draw.rectangle(((left+self.width//40*i, top), (left+self.width//40*(i+1), top+self.width//4)), fill=random_color)
-            
-            # images_distorted PIL -> numpy
-            images_distorted = np.array(images_distorted)
-            images_resize = cv.resize(images_distorted, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서
-            images_resize = images_resize / 255 # normalization
-            distorted_images_list.append(images_resize)
-        self.distorted_images = np.array(distorted_images_list)
-
+        
     def outputs(self):
-        images = self.images.astype(np.float32)
-        distorted_images = self.distorted_images.astype(np.float32)
+        images = self.images.astype(np.float32) # self.appearance_embedded = True and self.transient_embedded = False -> distorted image
         poses = self.poses.astype(np.float32) # Test
         bds = self.bds # Test 
         render_poses = self.render_poses.astype(np.float32) # Test
         i_val = self.i_val # Test
         focal = self.focal
-        return images, distorted_images, poses, bds, render_poses, i_val, focal # focal length 추가해야 할 듯.
+        return images, poses, bds, render_poses, i_val, focal # focal length 추가해야 할 듯.
 
 # NeRF-W : rays_t -> 해당 ray가 어떠한 이미지에 속하는지에 대한 정보도 추가해야 한다.
 # poses <- poses : Train or Validation / poses <- render_poses : Test
@@ -205,11 +197,6 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
                  poses, 
                  i_val, 
                  images,
-                 distorted_images, 
-                 appearance_enbedding_word, 
-                 appearance_embedding_dim, 
-                 transient_embedding_word, 
-                 transient_embedding_dim, 
                  near=1.0, 
                  ndc_space=True, 
                  test=False, 
@@ -221,14 +208,13 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
         self.pose = poses[:,:,:4] # [?, 3, 4]
         self.i_val = i_val
         self.images = images
-        self.distorted_images = distorted_images
         self.near = near
         self.ndc_space = ndc_space
         self.test = test
         self.train = train
         # appearance embedding vector + trasient embedding vector
-        self.appearance_embedding_vector = nn.Embedding(appearance_enbedding_word, appearance_embedding_dim) # [1500, 48]
-        self.transient_embedding_vector = nn.Embedding(transient_embedding_word, transient_embedding_dim) # [1500, 16]
+        # self.appearance_embedding_vector = nn.Embedding(appearance_enbedding_word, appearance_embedding_dim) # [1500, 48]
+        # self.transient_embedding_vector = nn.Embedding(transient_embedding_word, transient_embedding_dim) # [1500, 16]
         
         # image 별로 index 설정 -> self.appearance_embedding_vector(rays_t의 값 = image frame id), self.transient_embedding_vector(rays_t의 값 = image frame id)
         # rays_t = image frame id x torch.ones(image height x image width)
@@ -250,7 +236,7 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             if self.train == True: # Train
                 self.pose = self.pose[self.train_idx,:,:]
                 # self.images = self.images[train_idx,:,:,:]
-                self.images = self.distorted_images[self.train_idx,:,:,:]
+                self.images = self.images[self.train_idx,:,:,:]
                 self.image_num = self.pose.shape[0]
                 
             elif self.train == False: # Validation
@@ -365,10 +351,11 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             rays_arr = rays_arr.reshape(-1, 2, 3)
         self.rays_rgb_list = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
     
-    def embedding_vector(self):
+    # TODO : list -> 시간 소요
+    def embedding_vector(self): # Q. 이미지에 따른 appearance embeddding vector + transient embedding vector를 만들기 위한 rays_t index
         rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
         rays_t_arr = torch.cat(rays_t_list, dim=0)
-        self.rays_t_list = [rays_t_arr[i] for i in range(len(rays_t_arr))] # list -> 시간 소요
+        self.rays_t_list = [rays_t_arr[i] for i in range(len(rays_t_arr))]
         
     def __len__(self): # should be iterable
         return len(self.rays_rgb_list)
@@ -391,28 +378,18 @@ class Rays_DATALOADER(object):
                  poses, 
                  i_val, 
                  images,
-                 distorted_images,
-                 appearance_embedding_word,
-                 appearance_embedding_dim,
-                 transient_embedding_word,
-                 transient_embedding_dim, 
                  near, 
                  ndc_space, 
                  test, 
                  train, 
                  shuffle,
-                 drop_last): # parameter -> kwargs
+                 drop_last): # TODO : parameter -> kwargs
         self.height = height
         self.width = width
         self.intrinsic = intrinsic
         self.poses = poses
         self.i_val = i_val
         self.images = images
-        self.distorted_images = distorted_images
-        self.appearance_embedding_word = appearance_embedding_word
-        self.appearance_embedding_dim = appearance_embedding_dim
-        self.transient_embedding_word = transient_embedding_word
-        self.transient_embedding_dim = transient_embedding_dim
         self.near = near # 1.0 -> default
         self.ndc_space = ndc_space
         self.test = test
@@ -424,11 +401,6 @@ class Rays_DATALOADER(object):
                                     self.poses, 
                                     self.i_val, 
                                     self.images,
-                                    self.distorted_images,
-                                    self.appearance_embedding_word, 
-                                    self.appearance_embedding_dim, 
-                                    self.transient_embedding_word, 
-                                    self.transient_embedding_dim, 
                                     self.near, 
                                     self.ndc_space,
                                     self.test,
