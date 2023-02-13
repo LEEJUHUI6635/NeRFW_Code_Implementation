@@ -91,20 +91,22 @@ class Solver(object):
     def basic_setting(self): # Q. 2개의 network를 학습?
         # TODO : 학습해야 하는 appearance embedding vector + transient embedding vector
         # TODO : coarse model만 먼저 학습해보기 -> Debugging
-        self.appearance_embedding_vector = torch.nn.Embedding(self.appearance_embedding_word, self.appearance_channel)
-        self.transient_embedding_vector = torch.nn.Embedding(self.transient_embedding_word, self.transient_channel)
+        self.appearance_embedding_vector = torch.nn.Embedding(20, self.appearance_channel) # image 개수대로 appearance embedding vector 생성
+        self.transient_embedding_vector = torch.nn.Embedding(20, self.transient_channel) # image 개수대로 transient embedding vector 생성
         
         # model -> Coarse + Fine
         # Coarse + Fine Network
         # 고민 -> 두 개의 network가 아니라 한 개의 network를 학습해야 하는 것이 아닌가? 즉, forward 부분도 하나로 통일해야 gradient가 한 번에 학습되는 것이 아닌가?
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
-        # self.coarse_model = NeRF().to(self.device)
         grad_variables = list(self.coarse_model.parameters())
         
         # self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
-        # # self.fine_model = NeRF().to(self.device)
         # grad_variables += list(self.fine_model.parameters())
+        
+        # appearance embedding vector + transient embedding vector -> 학습 대상에 추가
+        grad_variables += list(self.appearance_embedding_vector.parameters())
+        grad_variables += list(self.transient_embedding_vector.parameters())
         
         # optimizer
         self.optimizer = optim.Adam(params=grad_variables, lr=self.learning_rate, betas=(0.9, 0.999))
@@ -129,103 +131,71 @@ class Solver(object):
     # TODO : train과 test 구별하여 코드 구현, coarse와 fine 또한 구별
     # Classic Volume Rendering
     # self.classic_volume_rendering(outputs, z_vals, rays, self.device)
-    def classic_volume_rendering(self, sampling, raw, z_vals, rays, device): # input -> Network의 outputs [1024, 64, 4] + z_vals / output -> 2D color [1024, 3] -> rgb
-        # TODO : coarse model만을 고려한 classic volume rendering + uncertainty rendering
-        # if sampling.lower() == 'coarse': # 기존 NeRF와 동일
-        #     rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
-        #     raw = raw.to(self.device)
-        #     z_vals = z_vals.to(self.device)
-        #     rays = rays.to(self.device)
-        #     rays_d = rays_d.to(self.device)
-        #     rgb_3d = torch.sigmoid(raw[:,:,:3]) # [1024, 64, 3]
-        #     rgb_3d = rgb_3d.to(self.device)
-        #     density = raw[:,:,3:4] # [1024, 64, 1]
-        #     density = density.to(self.device)
-        #     dists = z_vals[:,1:] - z_vals[:,:-1] # [1024, 63]
-        #     dists = dists.to(device)
-        #     # print(dists.shape) # [1024, 63]
-        #     dists = torch.cat([dists, (torch.Tensor([1e10]).expand(dists.shape[0], 1)).to(self.device)], dim=-1)
-        #     # print(dists.shape) # [1024, 64]
-        #     dists = dists * torch.norm(rays_d, dim=-1)
-        #     # print(dists.shape) # [1024, 64]
-        #     dists = dists.to(self.device)
-        #     active_func = nn.ReLU()
-        #     noise = torch.randn_like(dists)
-        #     noise = noise.to(self.device)
-        #     alpha = 1 - torch.exp(-active_func((density.squeeze() + noise) * dists))
-        #     # torch.cumprod([a, b, c, d, e]) = [a, a*b, a*b*c, a*b*c*d, a*b*c*d*e]
-        #     transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
-        #     weights = alpha * transmittance
-        #     # print(weights.shape) # [1024, 64]
-        #     rgb_2d = torch.sum(weights[...,None] * rgb_3d, dim=-2)
-        #     # print(rgb_2d.shape) # [1024, 3]
-        #     return rgb_2d, weights
+    def classic_volume_rendering(self, raw, z_vals, rays, device): # input -> Network의 outputs [1024, 64, 4] + z_vals / output -> 2D color [1024, 3] -> rgb
+        rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
+        raw = raw.to(self.device) # [static_rgb_outputs, static_density_outputs, uncertainty_outputs, transient_rgb_outputs, transient_density_outputs]
+        z_vals = z_vals.to(self.device)
+        rays = rays.to(self.device)
+        rays_d = rays_d.to(self.device)
         
-        if sampling.lower() == 'coarse':
-            rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
-            raw = raw.to(self.device) # [static_rgb_outputs, static_density_outputs, uncertainty_outputs, transient_rgb_outputs, transient_density_outputs]
-            z_vals = z_vals.to(self.device)
-            rays = rays.to(self.device)
-            rays_d = rays_d.to(self.device)
-            
-            # static
-            static_rgb_3d = torch.sigmoid(raw[:,:,:3]) # [1024, 64, 3]
-            static_rgb_3d = static_rgb_3d.to(self.device)
-            static_density = raw[:,:,3:4] # [1024, 64, 1]
-            static_density = static_density.to(self.device)
-            
-            # transient 
-            transient_rgb_3d = torch.sigmoid(raw[:,:,5:8]) # [1024, 64, 3]
-            transient_rgb_3d = transient_rgb_3d.to(self.device)
-            transient_density = raw[:,:,8:] # [1024, 64, 1]
-            transient_density = transient_density.to(self.device)
-            uncertainty = raw[:,:,4:5] # [1024, 64, 1]
-            uncertainty = uncertainty.to(self.device)
-            
-            dists = z_vals[:,1:] - z_vals[:,:-1] # [1024, 63]
-            dists = dists.to(device)
-            # print(dists.shape) # [1024, 63]
-            dists = torch.cat([dists, (torch.Tensor([1e10]).expand(dists.shape[0], 1)).to(self.device)], dim=-1)
-            # print(dists.shape) # [1024, 64]
-            dists = dists * torch.norm(rays_d, dim=-1)
-            # print(dists.shape) # [1024, 64]
-            dists = dists.to(self.device)
-            active_func = nn.ReLU()
-            noise = torch.randn_like(dists)
-            noise = noise.to(self.device)
-            
-            # static
-            static_alpha = 1 - torch.exp(-active_func((static_density.squeeze() + noise) * dists))
-            
-            # transient
-            transient_alpha = 1 - torch.exp(-active_func((transient_density.squeeze() + noise) * dists))
-            
-            # static + transient
-            alpha = 1 - torch.exp(-active_func((static_density.squeeze() + transient_density.squeeze() + noise) * dists))
-            transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
-            
-            # static
-            static_weights = static_alpha * transmittance
-            
-            # transient
-            transient_weights = transient_alpha * transmittance
-            
-            # static + transient
-            weights = alpha * transmittance
-            
-            # static 
-            static_rgb_2d = torch.sum(static_weights[...,None] * static_rgb_3d, dim=-2)
-            # transient
-            transient_rgb_2d = torch.sum(transient_weights[...,None] * transient_rgb_3d, dim=-2)
-            # static + transient
-            rgb_2d = static_rgb_2d + transient_rgb_2d
-            
-            # uncertainty
-            # print((transient_weights * uncertainty.squeeze()).shape) # [1024, 64]
-            beta = torch.sum(transient_weights * uncertainty.squeeze(), dim=1) + 0.03
-            # print(beta.shape) # [1024]
-            
-            return rgb_2d, weights, beta
+        # static
+        static_rgb_3d = torch.sigmoid(raw[:,:,:3]) # [1024, 64, 3]
+        static_rgb_3d = static_rgb_3d.to(self.device)
+        static_density = raw[:,:,3:4] # [1024, 64, 1]
+        static_density = static_density.to(self.device)
+        
+        # transient
+        transient_rgb_3d = torch.sigmoid(raw[:,:,5:8]) # [1024, 64, 3]
+        transient_rgb_3d = transient_rgb_3d.to(self.device)
+        transient_density = raw[:,:,8:] # [1024, 64, 1]
+        transient_density = transient_density.to(self.device)
+        uncertainty = raw[:,:,4:5] # [1024, 64, 1]
+        uncertainty = uncertainty.to(self.device)
+        
+        dists = z_vals[:,1:] - z_vals[:,:-1] # [1024, 63]
+        dists = dists.to(device)
+        # print(dists.shape) # [1024, 63]
+        dists = torch.cat([dists, (torch.Tensor([1e10]).expand(dists.shape[0], 1)).to(self.device)], dim=-1)
+        # print(dists.shape) # [1024, 64]
+        dists = dists * torch.norm(rays_d, dim=-1)
+        # print(dists.shape) # [1024, 64]
+        dists = dists.to(self.device)
+        active_func = nn.ReLU()
+        noise = torch.randn_like(dists)
+        noise = noise.to(self.device)
+        
+        # static
+        static_alpha = 1 - torch.exp(-active_func((static_density.squeeze() + noise) * dists))
+        
+        # transient
+        transient_alpha = 1 - torch.exp(-active_func((transient_density.squeeze() + noise) * dists))
+        
+        # static + transient
+        alpha = 1 - torch.exp(-active_func((static_density.squeeze() + transient_density.squeeze() + noise) * dists))
+        transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
+        
+        # static
+        static_weights = static_alpha * transmittance
+        
+        # transient
+        transient_weights = transient_alpha * transmittance
+        
+        # static + transient
+        weights = alpha * transmittance
+        
+        # static 
+        static_rgb_2d = torch.sum(static_weights[...,None] * static_rgb_3d, dim=-2)
+        # transient
+        transient_rgb_2d = torch.sum(transient_weights[...,None] * transient_rgb_3d, dim=-2)
+        # static + transient
+        rgb_2d = static_rgb_2d + transient_rgb_2d
+        
+        # uncertainty
+        # print((transient_weights * uncertainty.squeeze()).shape) # [1024, 64]
+        beta = torch.sum(transient_weights * uncertainty.squeeze(), dim=1) + 0.03
+        # print(beta.shape) # [1024]
+        
+        return rgb_2d, weights, beta
     
     # *****net_chunk*****
     def train(self): # device -> dataset, model
@@ -233,13 +203,13 @@ class Solver(object):
         start_iters = 0
         if self.resume_iters != None: # self.resume_iters
             coarse_ckpt = torch.load(os.path.join(self.save_coarse_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
-            fine_ckpt = torch.load(os.path.join(self.save_fine_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+            # fine_ckpt = torch.load(os.path.join(self.save_fine_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
             self.coarse_model.load_state_dict(coarse_ckpt['model'])
-            self.fine_model.load_state_dict(fine_ckpt['model'])
+            # self.fine_model.load_state_dict(fine_ckpt['model'])
             self.optimizer.load_state_dict(coarse_ckpt['optimizer'])
             start_iters = self.resume_iters + 1
             self.coarse_model.train()
-            self.fine_model.train()
+            # self.fine_model.train()
             
         # Time check
         start_time = time.time()
@@ -295,13 +265,13 @@ class Solver(object):
                 # print(outputs.shape) # [1024, 64, 9]
                 transient_density = outputs[:,:,8:]
                 # classic volume rendering -> transient part 추가
-                rgb_2d, weights, beta = self.classic_volume_rendering('coarse', outputs, z_vals, rays, self.device)
+                rgb_2d, weights, beta = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
                 rgb_2d = rgb_2d.to(self.device)
                 beta = beta.to(self.device)
                 transient_density = transient_density.to(self.device)
                 rays_rgb = rays_rgb.to(self.device)
-                # # Fine model -> model input(pts, view_dirs, ?), model output(static rgb + static density + uncertainty + transient rgb + transient density), classic volume rendering(static + transient),
-                # # loss function
+
+                # # Fine Network
                 # # Hierarchical sampling + viewing_directions
                 # fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
                 # fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3] -> [1024, self.coarse_num + self.fine_num, 3]
@@ -316,6 +286,7 @@ class Solver(object):
                 # fine_pts = fine_pts.to(self.device)
                 # fine_view_dirs = fine_view_dirs.to(self.device)
                 
+                # # TODO : embedding vector를 어디에서 정의해야 하는가?
                 # # Appearance embedding + Transient embedding
                 # appearance_fine_embedded = self.appearance_embedding_vector(rays_t)
                 # appearance_fine_embedded = appearance_fine_embedded.reshape(batch_size, 1, self.appearance_channel)
@@ -336,37 +307,12 @@ class Solver(object):
                 # # fine_outputs = self.fine_model(fine_inputs)
                 # fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 9) # 128 = self.coarse_num + self.fine_num
                 
-                # # debugging
-                # fine_outputs = fine_outputs[:,:,:4]
                 # # classic volume rendering
-                # # fine_rgb_2d, static_rgb_2d, transient_rgb_2d, fine_weights, static_weights, transient_weights, beta = \
-                # #     self.classic_volume_rendering('fine', fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
-                # fine_rgb_2d, fine_weights = \
-                #     self.classic_volume_rendering('coarse', fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
-                # fine_rgb_2d = fine_rgb_2d.to(self.device)
-                # rgb_2d = rgb_2d.to(self.device)
-                # rays_rgb = rays_rgb.to(self.device)
+                # fine_rgb_2d, fine_weights, fine_beta = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device)
                 
-                # # output -> uncertainty + transient density
-                # transient_density = fine_outputs[:,:,8:]
-                # # TODO : rays_rgb -> GT가 될 것인가? 어떠한 image가 될 것인가?
-                # # loss = coarse color loss function + fine color loss function + uncertainty loss function + transient density loss function
-                
-                
-                # debugging
-                # beta = torch.sum(beta, dim=1)
-                # beta = beta.unsqueeze(dim=1)
                 beta = beta.unsqueeze(dim=1)
-                loss = self.fine_color_loss(rgb_2d, rays_rgb, beta) + self.uncertainty_loss(beta) + self.transient_density_loss(transient_density)
-                
-                # # coarse color loss function
-                # self.coarse_color_loss = lambda x, y : torch.mean((x - y) ** 2)
-                # # fine color loss function
-                # self.fine_color_loss = lambda x, y, z : torch.mean((x - y) ** 2 / pow(z, 2))
-                # # uncertainty loss function
-                # self.uncertainty_loss = lambda z : 3 + torch.mean(pow(torch.log(z))) # positive
-                # # transient density loss function
-                # self.transient_density_loss = lambda r : torch.mean(0.01 * r) # r -> transient density
+                # fine_beta = fine_beta.unsqueeze(dim=1)
+                loss = self.coarse_color_loss(rgb_2d, rays_rgb) + self.fine_color_loss(rgb_2d, rays_rgb, beta) + self.uncertainty_loss(beta) + self.transient_density_loss(transient_density)
                 
                 # optimizer
                 self.optimizer.zero_grad()
@@ -376,7 +322,7 @@ class Solver(object):
                 psnr = self.psnr(loss) # psnr 조금 수정해야 할 듯.
                 # print(rays.shape) # [1024, 3, 3]
                 # iteration n번 마다 출력
-                print(idx, loss)
+                print(idx, loss, rays_t)
                 # print(fine_rgb_2d.shape) # [1024, 3]
                 if idx == 0:
                     train_image_arr = rgb_2d
@@ -389,30 +335,28 @@ class Solver(object):
                     train_image = train_image_arr.reshape(self.height, self.width, 3)
                     train_image = train_image * 255.0
                     train_image = np.array(train_image.detach().cpu())
-                    cv.imwrite('./results/train/train_image_{}.png'.format(epoch), train_image)
+                    cv.imwrite('./results/train/2_train_image_{}.png'.format(epoch), train_image)
                     s += 1
             
             print('one epoch passed!')
             
-            
-
             # 한 epoch가 지날 때마다,
             print(idx, loss, psnr)
             print('----{}s seconds----'.format(time.time() - start_time))
             
-            # Learning rate decay -> self.optimizer에도 적용되어야 한다.
-            decay_rate = 0.1
-            decay_steps = 250 * 1000
-            new_lrate = self.learning_rate * (decay_rate ** (epoch / decay_steps))
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = new_lrate
+            # # Learning rate decay -> self.optimizer에도 적용되어야 한다.
+            # decay_rate = 0.1
+            # decay_steps = 250 * 1000
+            # new_lrate = self.learning_rate * (decay_rate ** (epoch / decay_steps))
+            # for param_group in self.optimizer.param_groups:
+            #     param_group['lr'] = new_lrate
 
-            # # 한 epoch마다 model, optimizer 저장 -> 15 epoch마다
-            # # Save_Checkpoints -> 하나로 합치기
-            # if epoch % self.save_model_iters == 0 and epoch > 0: 
-            # # if epoch % 1 == 0 and epoch > 0:
-            #     Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
-            #     Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
+            # 한 epoch마다 model, optimizer 저장 -> 15 epoch마다
+            # Save_Checkpoints -> 하나로 합치기
+            if epoch % self.save_model_iters == 0 and epoch > 0: 
+            # if epoch % 1 == 0 and epoch > 0:
+                Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
+                # Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
             
             # # Validation -> Validataion Dataloader = rays + NDC space 전에 추출한 get_rays의 view_dirs -> Train과 똑같이 처리한다. 다만, rays_rgb는 가져올 필요 없다.
             # if epoch % self.save_val_iters == 0 and epoch > 0: # if epoch % 10 == 0 and epoch > 0:

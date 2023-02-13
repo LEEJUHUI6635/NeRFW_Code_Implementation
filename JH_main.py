@@ -25,7 +25,7 @@ parser.add_argument('--ndc_space', type=bool, default=True)
 # train
 parser.add_argument('--resume_iters', type=int, default=None)
 parser.add_argument('--mode', type=str, default='Train', choices=['Train', 'Test']) # list 형식으로 만들기
-parser.add_argument('--nb_epochs', type=int, default=60) # 60 epoch = 20000 iterations
+parser.add_argument('--nb_epochs', type=int, default=240) # 60 epoch = 20000 iterations
 parser.add_argument('--save_val_iters', type=int, default=5) # 1 epoch마다 validation 수행
 parser.add_argument('--save_model_iters', type=int, default=15)
 
@@ -41,9 +41,9 @@ parser.add_argument('--sample_num', type=int, default=64)
 # NeRF-W -> appearance embedding vector의 단어 수, 차원, transient embedding vector의 단어 수, 차원
 parser.add_argument('--appearance_embedded', type=bool, default=True)
 parser.add_argument('--transient_embedded', type=bool, default=True)
-parser.add_argument('--appearance_embedding_word', type=int, default=1500)
+parser.add_argument('--appearance_embedding_word', type=int, default=20)
 parser.add_argument('--appearance_embedding_dim', type=int, default=48)
-parser.add_argument('--transient_embedding_word', type=int, default=1500)
+parser.add_argument('--transient_embedding_word', type=int, default=20)
 parser.add_argument('--transient_embedding_dim', type=int, default=16)
 
 # save path

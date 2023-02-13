@@ -1,4 +1,3 @@
-from re import S
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -173,7 +172,7 @@ class NeRF(nn.Module):
     
     def main(self):
         self.main_list = []
-        self.main_list.append(nn.Linear(in_features=self.pts_channel+self.hidden_channel, out_features=self.hidden_channel))
+        self.main_list.append(nn.Linear(in_features=self.pts_channel + self.hidden_channel, out_features=self.hidden_channel))
         self.main_list.append(nn.ReLU(inplace=True))
         for i in range(4):
             self.main_list.append(nn.Linear(in_features=self.hidden_channel, out_features=self.hidden_channel))
@@ -200,49 +199,51 @@ class NeRF(nn.Module):
         # coarse -> [65536, 154] = [1024 x 64, 63 + 27 + 48 + 16] / fine -> [131072, 154] = [1024 x 128, 63 + 27 + 48 + 16]
         # TODO : 먼저 coarse model만 고려하기
         if sampling.lower() == 'coarse':
-            sample_num = 64 # 변수로 치환
-            # input -> pts, dirs, appearance embedding vector, transient embedding vector
-            pts = x[:,:self.pts_channel] # 63
-            acc_channel = self.pts_channel
-            dirs = x[:,acc_channel:acc_channel+self.dir_channel] # 27
-            acc_channel += self.dir_channel
-            appearance_embedding = x[:,acc_channel:acc_channel+self.appearance_channel] # 48
-            acc_channel += self.appearance_channel
-            transient_embedding = x[:,acc_channel:] # 16
-            
-            # residual learning
-            feature = self.residual_block(pts) # [65536, 256]
-            feature = torch.cat([pts, feature], dim=1) # [65536, 63 + 256]
-            feature2 = self.main_block(feature) # [65536, 256]
-            # appearance block의 input
-            # debugging
-            appearance_input = torch.cat([appearance_embedding, dirs, feature2], dim=1)
-            # print(appearance_input.shape) # [65536, 331], 331 = 48 + 27 + 256
-            feature3 = self.appearance_block(appearance_input)
-            static_rgb_outputs = self.static_rgb_outputs(feature3)
+            sample_num = 64 # TODO : 변수로 치환
+        elif sampling.lower() == 'fine':
+            sample_num = 128 # TODO : 변수로 치환
+        # input -> pts, dirs, appearance embedding vector, transient embedding vector
+        pts = x[:,:self.pts_channel] # 63
+        acc_channel = self.pts_channel
+        dirs = x[:,acc_channel:acc_channel+self.dir_channel] # 27
+        acc_channel += self.dir_channel
+        appearance_embedding = x[:,acc_channel:acc_channel+self.appearance_channel] # 48
+        acc_channel += self.appearance_channel
+        transient_embedding = x[:,acc_channel:] # 16
+        
+        # residual learning
+        feature = self.residual_block(pts) # [65536, 256]
+        feature = torch.cat([pts, feature], dim=1) # [65536, 63 + 256]
+        feature2 = self.main_block(feature) # [65536, 256]
+        # appearance block의 input
+        # debugging
+        appearance_input = torch.cat([appearance_embedding, dirs, feature2], dim=1)
+        # print(appearance_input.shape) # [65536, 331], 331 = 48 + 27 + 256
+        feature3 = self.appearance_block(appearance_input)
+        static_rgb_outputs = self.static_rgb_outputs(feature3)
 
-            # static density
-            static_density_outputs = self.static_density_outputs(feature2) # [65536, 3]
-            
-            # transient block의 input
-            transient_input = torch.cat([transient_embedding, feature2], dim=1)
-            # print(transient_input.shape) # [65536, 272], 272 = 256 + 16
-            feature4 = self.transient_block(transient_input)
+        # static density
+        static_density_outputs = self.static_density_outputs(feature2) # [65536, 3]
+        
+        # transient block의 input
+        transient_input = torch.cat([transient_embedding, feature2], dim=1)
+        # print(transient_input.shape) # [65536, 272], 272 = 256 + 16
+        feature4 = self.transient_block(transient_input)
 
-            # uncertainty
-            uncertainty_outputs = self.uncertainty_outputs(feature4)
-            # transient rgb
-            transient_rgb_outputs = self.transient_rgb_outputs(feature4)
-            # transient density
-            transient_density_outputs = self.transient_density_outputs(feature4)
-            
-            # static + transient
-            static_outputs = torch.cat([static_rgb_outputs, static_density_outputs], dim=1)
-            transient_outputs = torch.cat([uncertainty_outputs, transient_rgb_outputs, transient_density_outputs], dim=1)
-            # print(static_outputs.shape) # [65536, 4]
-            # print(transient_outputs.shape) # [65536, 5]
+        # uncertainty
+        uncertainty_outputs = self.uncertainty_outputs(feature4)
+        # transient rgb
+        transient_rgb_outputs = self.transient_rgb_outputs(feature4)
+        # transient density
+        transient_density_outputs = self.transient_density_outputs(feature4)
+        
+        # static + transient
+        static_outputs = torch.cat([static_rgb_outputs, static_density_outputs], dim=1)
+        transient_outputs = torch.cat([uncertainty_outputs, transient_rgb_outputs, transient_density_outputs], dim=1)
+        # print(static_outputs.shape) # [65536, 4]
+        # print(transient_outputs.shape) # [65536, 5]
 
-            outputs = torch.cat([static_outputs, transient_outputs], dim=1) # [65536, 9], 9 = 3 + 1 + 3 + 1 + 1
-            outputs = outputs.reshape([x.shape[0] // sample_num, sample_num, self.output_channel]) # [1024, 64, 9]
-            
-            return outputs
+        outputs = torch.cat([static_outputs, transient_outputs], dim=1) # [65536, 9], 9 = 3 + 1 + 3 + 1 + 1
+        outputs = outputs.reshape([x.shape[0] // sample_num, sample_num, self.output_channel]) # [1024, 64, 9]
+        
+        return outputs
