@@ -139,7 +139,74 @@ class Solver(object):
     # TODO : train과 test 구별하여 코드 구현, coarse와 fine 또한 구별
     # Classic Volume Rendering
     # self.classic_volume_rendering(outputs, z_vals, rays, self.device)
-    def classic_volume_rendering(self, raw, z_vals, rays, device): # input -> Network의 outputs [1024, 64, 4] + z_vals / output -> 2D color [1024, 3] -> rgb
+    # def classic_volume_rendering(self, raw, z_vals, rays, device): # input -> Network의 outputs [1024, 64, 4] + z_vals / output -> 2D color [1024, 3] -> rgb
+    #     rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
+    #     raw = raw.to(self.device) # [static_rgb_outputs, static_density_outputs, uncertainty_outputs, transient_rgb_outputs, transient_density_outputs]
+    #     z_vals = z_vals.to(self.device)
+    #     rays = rays.to(self.device)
+    #     rays_d = rays_d.to(self.device)
+        
+    #     # static
+    #     static_rgb_3d = torch.sigmoid(raw[:,:,:3]) # [1024, 64, 3]
+    #     static_rgb_3d = static_rgb_3d.to(self.device)
+    #     static_density = raw[:,:,3:4] # [1024, 64, 1]
+    #     static_density = static_density.to(self.device)
+        
+    #     # transient
+    #     transient_rgb_3d = torch.sigmoid(raw[:,:,5:8]) # [1024, 64, 3]
+    #     transient_rgb_3d = transient_rgb_3d.to(self.device)
+    #     transient_density = raw[:,:,8:] # [1024, 64, 1]
+    #     transient_density = transient_density.to(self.device)
+    #     uncertainty = raw[:,:,4:5] # [1024, 64, 1]
+    #     uncertainty = uncertainty.to(self.device)
+        
+    #     dists = z_vals[:,1:] - z_vals[:,:-1] # [1024, 63]
+    #     dists = dists.to(device)
+    #     # print(dists.shape) # [1024, 63]
+    #     dists = torch.cat([dists, (torch.Tensor([1e10]).expand(dists.shape[0], 1)).to(self.device)], dim=-1)
+    #     # print(dists.shape) # [1024, 64]
+    #     dists = dists * torch.norm(rays_d, dim=-1)
+    #     # print(dists.shape) # [1024, 64]
+    #     dists = dists.to(self.device)
+    #     active_func = nn.ReLU()
+    #     noise = torch.randn_like(dists)
+    #     noise = noise.to(self.device)
+        
+    #     # static
+    #     static_alpha = 1 - torch.exp(-active_func((static_density.squeeze() + noise) * dists))
+        
+    #     # transient
+    #     transient_alpha = 1 - torch.exp(-active_func((transient_density.squeeze() + noise) * dists))
+        
+    #     # static + transient
+    #     alpha = 1 - torch.exp(-active_func((static_density.squeeze() + transient_density.squeeze() + noise) * dists))
+    #     transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
+        
+    #     # static
+    #     static_weights = static_alpha * transmittance
+        
+    #     # transient
+    #     transient_weights = transient_alpha * transmittance
+        
+    #     # static + transient
+    #     weights = alpha * transmittance
+        
+    #     # static 
+    #     static_rgb_2d = torch.sum(static_weights[...,None] * static_rgb_3d, dim=-2)
+    #     # transient
+    #     transient_rgb_2d = torch.sum(transient_weights[...,None] * transient_rgb_3d, dim=-2)
+    #     # static + transient
+    #     rgb_2d = static_rgb_2d + transient_rgb_2d
+        
+    #     # uncertainty
+    #     # print((transient_weights * uncertainty.squeeze()).shape) # [1024, 64]
+    #     beta = torch.sum(transient_weights * uncertainty.squeeze(), dim=1) + 0.03
+    #     # print(beta.shape) # [1024]
+        
+    #     return rgb_2d, weights, beta
+    
+    # TODO : nerf_pl의 classic volume rendering 가져와서 비교
+    def classic_volume_rendering(self, raw, z_vals, rays, device):
         rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
         raw = raw.to(self.device) # [static_rgb_outputs, static_density_outputs, uncertainty_outputs, transient_rgb_outputs, transient_density_outputs]
         z_vals = z_vals.to(self.device)
@@ -160,49 +227,35 @@ class Solver(object):
         uncertainty = raw[:,:,4:5] # [1024, 64, 1]
         uncertainty = uncertainty.to(self.device)
         
-        dists = z_vals[:,1:] - z_vals[:,:-1] # [1024, 63]
-        dists = dists.to(device)
-        # print(dists.shape) # [1024, 63]
-        dists = torch.cat([dists, (torch.Tensor([1e10]).expand(dists.shape[0], 1)).to(self.device)], dim=-1)
-        # print(dists.shape) # [1024, 64]
-        dists = dists * torch.norm(rays_d, dim=-1)
-        # print(dists.shape) # [1024, 64]
-        dists = dists.to(self.device)
-        active_func = nn.ReLU()
-        noise = torch.randn_like(dists)
-        noise = noise.to(self.device)
+        deltas = z_vals[:, 1:] - z_vals[:, :-1] # (N_rays, N_samples_-1)
+        delta_inf = 1e2 * torch.ones_like(deltas[:, :1]) # (N_rays, 1) the last delta is infinity
+        deltas = torch.cat([deltas, delta_inf], -1)  # (N_rays, N_samples_)
+        # print(deltas.shape) # [2048, 64]
+        # print(static_density.shape) # [2048, 64, 1]
+        static_alphas = 1-torch.exp(-deltas*static_density.squeeze()) # static alpha compositing
+        transient_alphas = 1-torch.exp(-deltas*transient_density.squeeze()) # transient alpha compositing
+        alphas = 1-torch.exp(-deltas*(static_density.squeeze()+transient_density.squeeze()))
         
-        # static
-        static_alpha = 1 - torch.exp(-active_func((static_density.squeeze() + noise) * dists))
+        alphas_shifted = torch.cat([torch.ones_like(alphas[:, :1]), 1-alphas], -1) # [1, 1-a1, 1-a2, ...]
+        transmittance = torch.cumprod(alphas_shifted[:, :-1], -1) # [1, 1-a1, (1-a1)(1-a2), ...]
         
-        # transient
-        transient_alpha = 1 - torch.exp(-active_func((transient_density.squeeze() + noise) * dists))
+        static_weights = static_alphas * transmittance
+        transient_weights = transient_alphas * transmittance
         
-        # static + transient
-        alpha = 1 - torch.exp(-active_func((static_density.squeeze() + transient_density.squeeze() + noise) * dists))
-        transmittance = torch.cumprod(torch.cat([torch.ones(alpha.shape[0], 1).to(self.device), (1 - alpha + 1e-10).to(self.device)], dim=-1), dim=-1)[:,:-1]
+        weights = alphas * transmittance # weights -> 'n1 n2 -> n1', 'sum'
+        weights = torch.sum(weights, dim=1)
+        static_rgb_map = static_weights.unsqueeze(dim=-1) * static_rgb_3d
+        static_rgb_map = torch.sum(static_rgb_map, dim=1)
+        transient_rgb_map = transient_weights.unsqueeze(dim=-1) * transient_rgb_3d
+        transient_rgb_map = torch.sum(transient_rgb_map, dim=1)
+
+        beta = transient_weights * uncertainty.squeeze()
+        beta = torch.sum(beta, dim=1)
         
-        # static
-        static_weights = static_alpha * transmittance
-        
-        # transient
-        transient_weights = transient_alpha * transmittance
-        
-        # static + transient
-        weights = alpha * transmittance
-        
-        # static 
-        static_rgb_2d = torch.sum(static_weights[...,None] * static_rgb_3d, dim=-2)
-        # transient
-        transient_rgb_2d = torch.sum(transient_weights[...,None] * transient_rgb_3d, dim=-2)
-        # static + transient
-        rgb_2d = static_rgb_2d + transient_rgb_2d
-        
-        # uncertainty
-        # print((transient_weights * uncertainty.squeeze()).shape) # [1024, 64]
-        beta = torch.sum(transient_weights * uncertainty.squeeze(), dim=1) + 0.03
-        # print(beta.shape) # [1024]
-        
+        # static_rgb_map = static_weights(n1 n2 -> n1 n2 1) * static_rgbs(n1 n2 c -> n1 c, sum)
+        # transient_rgb_map = transient_weights(n1 n2 -> n1 n2 1) * transient_rgbs(n1 n2 c -> n1 c, sum)
+        # beta = transient_weights * uncertainty(n1 n2 -> n1, sum)
+        rgb_2d = static_rgb_map + transient_rgb_map
         return rgb_2d, weights, beta
     
     # *****net_chunk*****
