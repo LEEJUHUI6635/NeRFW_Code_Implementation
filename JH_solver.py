@@ -28,6 +28,9 @@ class Save_Checkpoints(object):
             self.save_checkpoints_epoch()
         elif self.select == 'last':
             self.save_checkpoints_last()
+        elif self.select == 'embedding':
+            self.save_checkpoints_embedding()
+            
     def save_checkpoints_epoch(self):
         torch.save({'epoch': self.epoch, 
                     'model': self.model.state_dict(), 
@@ -38,7 +41,10 @@ class Save_Checkpoints(object):
                     'model': self.model.state_dict(),
                     'optimizer': self.optimizer.state_dict(),
                     'loss': self.loss}, os.path.join(self.save_path, 'checkpoints_last.pt'))
-
+    def save_checkpoints_embedding(self):
+        torch.save({'epoch': self.epoch,
+                    'model': self.model.state_dict()}, os.path.join(self.save_path, 'checkpoints_{}.pt'.format(self.epoch)))
+        
 class Solver(object):
     def __init__(self, data_loader, val_data_loader, test_data_loader, config, i_val, height, width):
         self.data_loader = data_loader # rays dataloader
@@ -78,6 +84,8 @@ class Solver(object):
         self.save_model_path = config.save_model_path
         self.save_coarse_path = config.save_coarse_path
         self.save_fine_path = config.save_fine_path
+        self.save_appearance_embedding_path = config.save_appearance_embedding_path
+        self.save_transient_embedding_path = config.save_transient_embedding_path
         
         # validation
         self.i_val = i_val
@@ -202,6 +210,7 @@ class Solver(object):
         # 학습 재기 -> 마지막에 저장된 checkpoints의 epoch, coarse_model, fine_model, optimizer를 가져온다.
         start_iters = 0
         if self.resume_iters != None: # self.resume_iters
+            # TODO : appearance embedding vector와 transient embedding vector의 checkpoints load
             coarse_ckpt = torch.load(os.path.join(self.save_coarse_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
             # fine_ckpt = torch.load(os.path.join(self.save_fine_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
             self.coarse_model.load_state_dict(coarse_ckpt['model'])
@@ -335,7 +344,7 @@ class Solver(object):
                     train_image = train_image_arr.reshape(self.height, self.width, 3)
                     train_image = train_image * 255.0
                     train_image = np.array(train_image.detach().cpu())
-                    cv.imwrite('./results/train/2_train_image_{}.png'.format(epoch), train_image)
+                    cv.imwrite('./results/train/3_train_image_{}.png'.format(epoch), train_image)
                     s += 1
             
             print('one epoch passed!')
@@ -355,6 +364,9 @@ class Solver(object):
             # Save_Checkpoints -> 하나로 합치기
             if epoch % self.save_model_iters == 0 and epoch > 0: 
             # if epoch % 1 == 0 and epoch > 0:
+                # TODO : appearance embedding vector와 transient embedding vector의 checkpoints 저장
+                Save_Checkpoints(epoch, self.appearance_embedding_vector, None, None, self.save_appearance_embedding_path, 'embedding')
+                Save_Checkpoints(epoch, self.transient_embedding_vector, None, None, self.save_transient_embedding_path, 'embedding')
                 Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
                 # Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
             
@@ -433,24 +445,29 @@ class Solver(object):
         # render_only -> model checkpoints 가져오기
         # validation과 비슷하게 수행 -> test_dataloader에서 가져오기
         # 학습 재기 -> 마지막에 저장된 checkpoints의 coarse model과 fine model을 가져온다.
-        coarse_ckpt = torch.load(os.path.join(self.save_coarse_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
-        fine_ckpt = torch.load(os.path.join(self.save_fine_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
-        self.coarse_model.load_state_dict(coarse_ckpt['model'])
-        self.fine_model.load_state_dict(fine_ckpt['model'])
-        self.coarse_model.eval()
-        self.fine_model.eval()
         
+        # appearance embedding vector와 transient embedding vector에 대한 checkpoints를 load한다.
+        appearance_embedding_ckpt = torch.load(os.path.join(self.save_appearance_embedding_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+        transient_embedding_ckpt = torch.load(os.path.join(self.save_transient_embedding_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+        self.appearance_embedding_vector.load_state_dict(appearance_embedding_ckpt['model'])
+        self.transient_embedding_vector.load_state_dict(transient_embedding_ckpt['model'])
+        self.appearance_embedding_vector.eval()
+        self.transient_embedding_vector.eval()
+        
+        coarse_ckpt = torch.load(os.path.join(self.save_coarse_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+        self.coarse_model.load_state_dict(coarse_ckpt['model'])
+        self.coarse_model.eval()
+
         with torch.no_grad():
             test_image_list = []
             start_time = time.time()
             i = 0
-            for idx, [rays, view_dirs] in enumerate(tqdm.tqdm(self.test_data_loader)): # rays + view_dirs
+            for idx, [rays, view_dirs, rays_t] in enumerate(tqdm.tqdm(self.test_data_loader)): # rays + view_dirs
                 batch_size = rays.shape[0]
                 # view_dirs -> NDC 처리 전의 get_rays로부터
                 view_dirs = viewing_directions(view_dirs) # [1024, 3]
                 rays_o = rays[:,0,:]
                 rays_d = rays[:,1,:]
-                # rays_rgb = rays[:,2,:] # Test -> 쓸모 없다.
                 
                 # Stratified Sampling -> rays_o + rays_d -> view_dirs x
                 pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
@@ -472,37 +489,37 @@ class Solver(object):
                 outputs = self.coarse_model(inputs, sampling='coarse')
                 # outputs = self.coarse_model(inputs)
                 outputs = outputs.reshape(batch_size, self.coarse_num, 4)
-                rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
+                rgb_2d, _ = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
                 
-                # Hierarchical sampling + viewing_directions
-                fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
-                fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3], 128 = self.coarse_num + self.fine_num
+                # # Hierarchical sampling + viewing_directions
+                # fine_pts, fine_z_vals = Hierarchical_Sampling(rays, z_vals, weights, batch_size, self.sample_num, self.device).outputs()
+                # fine_pts = fine_pts.reshape(batch_size, self.coarse_num + self.fine_num, 3) # [1024, 128, 3], 128 = self.coarse_num + self.fine_num
                 
-                fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
-                fine_pts = fine_pts.reshape(-1, 3)
-                fine_view_dirs = fine_view_dirs.reshape(-1, 3)
+                # fine_view_dirs = view_dirs[:,None].expand(fine_pts.shape) # [1024, 128, 3]
+                # fine_pts = fine_pts.reshape(-1, 3)
+                # fine_view_dirs = fine_view_dirs.reshape(-1, 3)
                 
-                # Positional Encoding
-                fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
-                fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
-                fine_pts = fine_pts.to(self.device)
-                fine_view_dirs = fine_view_dirs.to(self.device)
-                fine_inputs = torch.cat([fine_pts, fine_view_dirs], dim=-1)
-                fine_inputs = fine_inputs.to(self.device)
+                # # Positional Encoding
+                # fine_pts = Positional_Encoding(self.L_pts).outputs(fine_pts)
+                # fine_view_dirs = Positional_Encoding(self.L_dirs).outputs(fine_view_dirs)
+                # fine_pts = fine_pts.to(self.device)
+                # fine_view_dirs = fine_view_dirs.to(self.device)
+                # fine_inputs = torch.cat([fine_pts, fine_view_dirs], dim=-1)
+                # fine_inputs = fine_inputs.to(self.device)
                 
-                # Fine model
-                fine_outputs = self.fine_model(fine_inputs, sampling='fine')
-                # fine_outputs = self.fine_model(fine_inputs)
-                fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 4) # 128 = self.coarse_num + self.fine_num
+                # # Fine model
+                # fine_outputs = self.fine_model(fine_inputs, sampling='fine')
+                # # fine_outputs = self.fine_model(fine_inputs)
+                # fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 4) # 128 = self.coarse_num + self.fine_num
 
-                # classic volume rendering
-                fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
-                fine_rgb_2d = fine_rgb_2d.to(self.device)
-                # print(fine_rgb_2d.shape) # [1024, 3]
-                fine_rgb_2d = fine_rgb_2d.cpu().detach().numpy()
-                fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
-                # 하나의 image 씩 -> batch_size가 1024가 아닐 때, (다른 dataset의 경우) image list의 길이가 378 x 504를 넘을 때, 하나의 이미지로 만든다.
-                test_image_list.append(fine_rgb_2d)
+                # # classic volume rendering
+                # fine_rgb_2d, fine_weights = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device) # z_vals -> Stratified sampling된 후의 z_vals
+                # fine_rgb_2d = fine_rgb_2d.to(self.device)
+                # # print(fine_rgb_2d.shape) # [1024, 3]
+                # fine_rgb_2d = fine_rgb_2d.cpu().detach().numpy()
+                # fine_rgb_2d = (255*np.clip(fine_rgb_2d,0,1)).astype(np.uint8)
+                # # 하나의 image 씩 -> batch_size가 1024가 아닐 때, (다른 dataset의 경우) image list의 길이가 378 x 504를 넘을 때, 하나의 이미지로 만든다.
+                test_image_list.append(rgb_2d)
         
                 if batch_size != self.batch_size or len(test_image_list) >= self.height * self.width: # self.batch_size = 1024
                     test_image_arr = np.concatenate(test_image_list, axis=0)
@@ -511,10 +528,3 @@ class Solver(object):
                     cv.imwrite(os.path.join(self.save_test_path, 'test_{}.png'.format(i)), test_image_arr)
                     test_image_list = [] # 이미지 1개 만들어내면, list 비우기
                     i += 1
-                    
-            # val_image_arr = np.concatenate(test_image_list, axis=0)
-            # val_image_arr = val_image_arr.reshape(120, 378, 504, 3) # validation image 개수만큼 -> flexible
-            # for i in range(120): # 120개의 image
-            #     image = val_image_arr[i,:,:,:]
-            #     cv.imwrite('./results/test/{}.png'.format(i), image)
-            #     print('----{}s seconds----'.format(time.time() - start_time)) # enumerate -> tqdm -> 진행 사항 표시 -> 21분 걸림 -> 시간 줄여야 한다.

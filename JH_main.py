@@ -19,15 +19,15 @@ parser = argparse.ArgumentParser(description='NeRF-W Implementation by JH')
 # LLFF
 parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/fern')
 parser.add_argument('--factor', type=int, default=8)
-parser.add_argument('--batch_size', type=int, default=1024)
-parser.add_argument('--ndc_space', type=bool, default=True)
+parser.add_argument('--batch_size', type=int, default=2048)
+parser.add_argument('--ndc_space', type=bool, default=False)
 
 # train
 parser.add_argument('--resume_iters', type=int, default=None)
 parser.add_argument('--mode', type=str, default='Train', choices=['Train', 'Test']) # list 형식으로 만들기
-parser.add_argument('--nb_epochs', type=int, default=240) # 60 epoch = 20000 iterations
+parser.add_argument('--nb_epochs', type=int, default=1000) # 60 epoch = 20000 iterations
 parser.add_argument('--save_val_iters', type=int, default=5) # 1 epoch마다 validation 수행
-parser.add_argument('--save_model_iters', type=int, default=15)
+parser.add_argument('--save_model_iters', type=int, default=5)
 
 parser.add_argument('--near', type=int, default=0)
 parser.add_argument('--far', type=int, default=1)
@@ -53,6 +53,11 @@ parser.add_argument('--save_test_path', type=str, default='results/test/')
 parser.add_argument('--save_model_path', type=str, default='models/')
 parser.add_argument('--save_coarse_path', type=str, default='models/coarse/')
 parser.add_argument('--save_fine_path', type=str, default='models/fine/')
+
+# NeRF-W
+parser.add_argument('--save_appearance_embedding_path', type=str, default='models/appearance_embedding/')
+parser.add_argument('--save_transient_embedding_path', type=str, default='models/transient_embedding/')
+
 config = parser.parse_args()
 
 # make directories
@@ -68,6 +73,10 @@ if not os.path.exists(config.save_coarse_path):
     os.makedirs(config.save_coarse_path)
 if not os.path.exists(config.save_fine_path):
     os.makedirs(config.save_fine_path)
+if not os.path.exists(config.save_appearance_embedding_path):
+    os.makedirs(config.save_appearance_embedding_path)
+if not os.path.exists(config.save_transient_embedding_path):
+    os.makedirs(config.save_transient_embedding_path)
 
 # Dataset preprocessing
 images, poses, bds, render_poses, i_val, focal = LLFF(config.base_dir, config.factor, config.appearance_embedded, config.transient_embedded).outputs() # focal도 추출

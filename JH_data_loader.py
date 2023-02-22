@@ -44,7 +44,7 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
         self.pre_poses() # Test
         self.spiral_path() # Test
         
-    def preprocessing(self): # Q. colmap의 순서를 고려해야 하나?
+    def preprocessing(self):
         # poses_bounds.npy 파일에서 pose와 bds를 얻는다.
         poses_bounds = np.load(os.path.join(self.base_dir, 'poses_bounds.npy'))
         self.image_num = poses_bounds.shape[0]
@@ -61,17 +61,18 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
             images_RGB = cv.imread(os.path.join(image_dir, file), flags=cv.IMREAD_COLOR) # RGB로 읽기
             self.width = images_RGB.shape[1]
             self.height = images_RGB.shape[0]
-            if self.appearance_embedded == False and self.transient_embedded == False:
+            if self.appearance_embedded == False and self.transient_embedded == False: # 기존의 NeRF
                 # appearance_embedded = False and transient_embedded = False
                 images_resize = cv.resize(images_RGB, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서 
                 images_norm = images_resize / 255 # normalization
                 images_list.append(images_norm)
             # appearance embedding + transient embedding
-            elif self.appearance_embedded == True and self.transient_embedded == True:
+            # TODO : appearance embedding과 transient embedding 따로 처리
+            elif self.appearance_embedded == True and self.transient_embedded == True: # NeRF in the wild
                 np.random.seed(idx) # image에 따른 random seed
                 # appearance embedding
                 # normalize
-                images_norm = images_RGB / 255 # normalization
+                images_norm = images_RGB / 255 # normalization -> 0 ~ 1
                 scale = np.random.uniform(low=0.8, high=1.2, size=3)
                 bias = np.random.uniform(low=-0.2, high=0.2, size=3)
                 images_norm = np.clip(scale*images_norm+bias, 0, 1)
@@ -91,20 +92,20 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
                 # images_distorted PIL -> numpy
                 images_distorted = np.array(images_distorted)
                 images_resize = cv.resize(images_distorted, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서
-                images_resize = images_resize / 255 # normalization
-                images_list.append(images_resize)        
+                images_norm = images_resize / 255 # normalization
+                images_list.append(images_norm)        
         self.images = np.array(images_list)
-        
+
     def pre_poses(self): # bds_factor에 대해 rescale을 처리해야 한다.
+        sc = 1. if self.bd_factor is None else 1./(self.bds.min() * self.bd_factor) # sc = 1 / (가장 작은 depth boundary x bd_factor)
         # 좌표축 변환, [-u, r, -t] -> [r, u, -t]
-        sc = 1. if self.bd_factor is None else 1./(self.bds.min() * self.bd_factor)
         self.poses = np.concatenate([self.poses[:,:,1:2], -self.poses[:,:,0:1], self.poses[:,:,2:]], axis=-1)
         
-        # bd_factor로 rescaling
+        # bd_factor로 rescaling -> Q. 
         self.poses[:,:3,3] *= sc # translation에 해당하는 부분
         self.bds *= sc
         
-        image_num = self.poses.shape[0]
+        image_num = self.poses.shape[0] # image의 개수
         # 20개 pose들의 average pose를 구하고, 새로운 world coordinate를 생성한다. -> camera to world coordinate
         new_world = new_origin(self.poses) # 새로운 world coordinate, c2w
         # 새로운 world coordinate를 중심으로 새로운 pose를 계산한다. -> poses = np.linalg.inv(c2w) @ poses
@@ -112,7 +113,7 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
         # image_height, image_width, focal_length를 factor로 나눈다.
         hwf = new_world[:,-1].reshape(1, 3, 1) // self.factor
         self.focal = np.squeeze(hwf[:,-1,:])
-
+        
         new_world = np.concatenate([new_world[:,:4], last], axis=0)
         last = last.reshape(1, 1, 4)
         lasts = np.repeat(last, image_num, axis=0)
@@ -184,11 +185,12 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
         bds = self.bds # Test 
         render_poses = self.render_poses.astype(np.float32) # Test
         i_val = self.i_val # Test
-        focal = self.focal
-        return images, poses, bds, render_poses, i_val, focal # focal length 추가해야 할 듯.
+        focal = self.focal # focal length
+        return images, poses, bds, render_poses, i_val, focal
 
 # NeRF-W : rays_t -> 해당 ray가 어떠한 이미지에 속하는지에 대한 정보도 추가해야 한다.
 # poses <- poses : Train or Validation / poses <- render_poses : Test
+# TODO : NDC space optional
 class Rays_DATASET(Dataset): # parameter -> kwargs
     def __init__(self, 
                  height, 
@@ -202,14 +204,14 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
                  test=False, 
                  train=True): # pose -> [20, 3, 5] / Test
         super(Rays_DATASET, self).__init__()
-        self.height = height
-        self.width = width
-        self.intrinsic = intrinsic
+        self.height = height # 378
+        self.width = width # 504
+        self.intrinsic = intrinsic # intrinsic parameter
         self.pose = poses[:,:,:4] # [?, 3, 4]
-        self.i_val = i_val
+        self.i_val = i_val # validation index
         self.images = images
-        self.near = near
-        self.ndc_space = ndc_space
+        self.near = near # Q.
+        self.ndc_space = ndc_space # optional
         self.test = test
         self.train = train
         # appearance embedding vector + trasient embedding vector
@@ -219,14 +221,14 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
         # image 별로 index 설정 -> self.appearance_embedding_vector(rays_t의 값 = image frame id), self.transient_embedding_vector(rays_t의 값 = image frame id)
         # rays_t = image frame id x torch.ones(image height x image width)
         
-        self.focal = self.intrinsic[0][0]
+        self.focal = self.intrinsic[0][0] # focal length
 
-        self.image_num = self.pose.shape[0] # Train과 Test 모두에 사용된다.
+        self.image_num = self.pose.shape[0] # Train과 Test 모두에 사용된다. -> 20
         
         if self.test == False: # Train or Validation
             self.train_idx = []
             val_idx = []
-            for i in range(self.image_num):
+            for i in range(self.image_num): # 20개만큼 반복
                 if i % self.i_val == 0:
                     val_idx.append(i) # [0, 12]
                     # print(val_idx) 
@@ -237,32 +239,25 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
                 self.pose = self.pose[self.train_idx,:,:]
                 # self.images = self.images[train_idx,:,:,:]
                 self.images = self.images[self.train_idx,:,:,:]
-                self.image_num = self.pose.shape[0]
+                self.image_num = self.pose.shape[0] # 18
                 
             elif self.train == False: # Validation
                 self.pose = self.pose[val_idx,:,:]
                 self.images = self.images[val_idx,:,:,:]
-                self.image_num = self.pose.shape[0]
-                
+                self.image_num = self.pose.shape[0] # 2
+        
+        # TODO : 보강
         if self.ndc_space == False:
-            self.all_rays()
+            self.all_rays() # view_dirs + rays_o + rays_d
                 
         elif self.ndc_space == True: # default -> LLFF dataloader
             self.all_rays() # view_dirs
-            self.ndc_all_rays()
+            self.ndc_all_rays() # rays_o + rays_d
         
         # TODO : embedding vector를 추가할 것인가에 대한 flag 생성
         self.embedding_vector()
         
         # train과 test의 차이는 train -> rays_o + rays_d + rays_rgb VS test -> rays_o + rays_d
-        
-        # # test_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, render_poses, None, None, near, config.ndc_space, True, False, shuffle=False, drop_last=False).data_loader() # Test
-        # elif self.test == True:
-        #     # Test dataloader -> rays_o + rays_d, rays_rgb는 필요 없다.
-        #     if self.ndc_space == False:
-        #         self.test_all_rays()
-        #     elif self.ndc_space == True:
-        #         self.test_ndc_all_rays()
         
     # 하나의 image에 대한 camera to world -> rays_o는 image마다 다르기 때문
     def get_rays(self, pose): # rays_o, rays_d
@@ -283,7 +278,7 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
 
         # 하나의 image에 대한 모든 픽셀의 ray에 대한 원점은 같아야 한다. ray는 3D point에서 2D point로 향하는 방향이다.
         rays_o = np.broadcast_to(pose[:3,3], rays_d.shape)
-        return rays_o, rays_d
+        return rays_o, rays_d # world 좌표계로 표현
     
     # NDC -> projection matrix
     # *****NDC 수식 이해하기***** -> Q. near = 1.?
@@ -306,9 +301,9 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
         rays_d = np.stack([d1, d2, d3], axis=0)
         rays = np.stack([rays_o, rays_d], axis=0) # [2, 378, 504, 3]
 
-        return rays
+        return rays # NDC space로 표현된 rays
     
-    # TODO : 
+    # TODO : NDC 처리를 하지 않은 경우 -> rays_o + rays_d + rays_rgb + viewing direction
     def all_rays(self): # 모든 image에 대한 rays -> rays_o + rays_d + rgb
         # rays + rgb -> [2, 378, 504, 3(x, y, -1)] + [1, 378, 504, 3(r, g, b)]
         # get_rays -> rays_o + rays_d
@@ -325,12 +320,13 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
         else:
             rays = rays.reshape([-1, 2, 3])
         self.rays = rays.astype(np.float32)
-        self.rays_rgb_list_2 = np.split(self.rays, self.rays.shape[0], axis=0)
+        self.rays_rgb_list_no_ndc = np.split(self.rays, self.rays.shape[0], axis=0)
         if self.test == False:
-            self.rays_rgb_list_2 = [self.rays_rgb_list_2[i].reshape(3, 3) for i in range(len(self.rays_rgb_list_2))]
+            self.rays_rgb_list_no_ndc = [self.rays_rgb_list_no_ndc[i].reshape(3, 3) for i in range(len(self.rays_rgb_list_no_ndc))]
         else:
-            self.rays_rgb_list_2 = [self.rays_rgb_list_2[i].reshape(2, 3) for i in range(len(self.rays_rgb_list_2))]
-        self.view_dirs_list = [self.rays_rgb_list_2[i][1:2,:] for i in range(len(self.rays_rgb_list_2))]
+            self.rays_rgb_list_no_ndc = [self.rays_rgb_list_no_ndc[i].reshape(2, 3) for i in range(len(self.rays_rgb_list_no_ndc))]
+        
+        self.view_dirs_list = [self.rays_rgb_list_no_ndc[i][1:2,:] for i in range(len(self.rays_rgb_list_no_ndc))]
         
     def ndc_all_rays(self): # ndc 처리
         rays_list = []
@@ -349,7 +345,7 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             rays_arr = rays_arr.reshape(-1, 3, 3) # [3429216, 3, 3], 3429216 = 18 x 504 x 378
         else: # self.test = True
             rays_arr = rays_arr.reshape(-1, 2, 3)
-        self.rays_rgb_list = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
+        self.rays_rgb_list_ndc = [rays_arr[i,:,:] for i in range(rays_arr.shape[0])]
     
     # TODO : list -> 시간 소요
     def embedding_vector(self): # Q. 이미지에 따른 appearance embeddding vector + transient embedding vector를 만들기 위한 rays_t index
@@ -358,10 +354,14 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
         self.rays_t_list = [rays_t_arr[i] for i in range(len(rays_t_arr))]
         
     def __len__(self): # should be iterable
-        return len(self.rays_rgb_list)
+        return len(self.rays_rgb_list_no_ndc)
         
     def __getitem__(self, index): # should be iterable
-        samples = self.rays_rgb_list[index]
+        if self.ndc_space == True:
+            samples = self.rays_rgb_list_ndc[index]
+        elif self.ndc_space == False:
+            samples = self.rays_rgb_list_no_ndc[index]
+            
         view_dirs = self.view_dirs_list[index] # Debugging -> test시에는 없다.
         rays_t = self.rays_t_list[index]
         # rays_t 추가
