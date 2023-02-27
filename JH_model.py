@@ -84,6 +84,7 @@ class Hierarchical_Sampling(object):
     def z_fine_sampling(self):
         self.z_vals = self.z_vals.to(self.device)
         mids = 0.5 * (self.z_vals[:,1:] + self.z_vals[:,:-1])
+        # print(self.weights.shape)
         weights = self.weights[:,1:-1].to(self.device)
         weights = weights + 1e-5 # 추후에 0으로 나뉘는 것을 방지
         pdf = weights / torch.norm(weights, dim=-1, keepdim=True)

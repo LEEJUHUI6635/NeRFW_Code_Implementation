@@ -227,10 +227,10 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
         
         if self.test == False: # Train or Validation
             self.train_idx = []
-            val_idx = []
+            self.val_idx = []
             for i in range(self.image_num): # 20개만큼 반복
                 if i % self.i_val == 0:
-                    val_idx.append(i) # [0, 12]
+                    self.val_idx.append(i) # [0, 12]
                     # print(val_idx) 
                 else: # image frame id
                     self.train_idx.append(i) # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19]
@@ -242,8 +242,8 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
                 self.image_num = self.pose.shape[0] # 18
                 
             elif self.train == False: # Validation
-                self.pose = self.pose[val_idx,:,:]
-                self.images = self.images[val_idx,:,:,:]
+                self.pose = self.pose[self.val_idx,:,:]
+                self.images = self.images[self.val_idx,:,:,:]
                 self.image_num = self.pose.shape[0] # 2
         
         # TODO : 보강
@@ -255,7 +255,8 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             self.ndc_all_rays() # rays_o + rays_d
         
         # TODO : embedding vector를 추가할 것인가에 대한 flag 생성
-        self.embedding_vector()
+        if self.test == False:
+            self.embedding_vector()
         
         # train과 test의 차이는 train -> rays_o + rays_d + rays_rgb VS test -> rays_o + rays_d
         
@@ -349,7 +350,10 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
     
     # TODO : list -> 시간 소요
     def embedding_vector(self): # Q. 이미지에 따른 appearance embeddding vector + transient embedding vector를 만들기 위한 rays_t index
-        rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
+        if self.test == False and self.train == True: # train
+            rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
+        elif self.test == False and self.train == False: # validation
+            rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.val_idx]
         rays_t_arr = torch.cat(rays_t_list, dim=0)
         self.rays_t_list = [rays_t_arr[i] for i in range(len(rays_t_arr))]
         
@@ -363,10 +367,13 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             samples = self.rays_rgb_list_no_ndc[index]
             
         view_dirs = self.view_dirs_list[index] # Debugging -> test시에는 없다.
-        rays_t = self.rays_t_list[index]
-        # rays_t 추가
-        results = [samples, view_dirs, rays_t]
-        # return samples, view_dirs # rays_o + rays_d + rgb
+        if self.test == False:
+            rays_t = self.rays_t_list[index]
+            # rays_t 추가
+            results = [samples, view_dirs, rays_t]
+            # return samples, view_dirs # rays_o + rays_d + rgb
+        elif self.test == True:
+            results = [samples, view_dirs]
         return results
 
 class Rays_DATALOADER(object):
