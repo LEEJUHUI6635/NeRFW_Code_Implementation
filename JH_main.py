@@ -17,10 +17,10 @@ cudnn.benchmark = True # For fast training
 parser = argparse.ArgumentParser(description='NeRF-W Implementation by JH')
 
 # LLFF
-parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/fern')
-parser.add_argument('--factor', type=int, default=8)
-parser.add_argument('--batch_size', type=int, default=2048)
-parser.add_argument('--ndc_space', type=bool, default=False)
+parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/JH_nerf_w_2')
+parser.add_argument('--factor', type=int, default=1) # factor = 1 -> killed
+parser.add_argument('--batch_size', type=int, default=1024)
+parser.add_argument('--ndc_space', type=bool, default=True)
 
 # train
 parser.add_argument('--resume_iters', type=int, default=None)
@@ -41,9 +41,9 @@ parser.add_argument('--sample_num', type=int, default=64)
 # NeRF-W -> appearance embedding vector의 단어 수, 차원, transient embedding vector의 단어 수, 차원
 parser.add_argument('--appearance_embedded', type=bool, default=True)
 parser.add_argument('--transient_embedded', type=bool, default=True)
-parser.add_argument('--appearance_embedding_word', type=int, default=20)
+parser.add_argument('--appearance_embedding_word', type=int, default=56) # appearance embedding vector의 dim = 2 -> 조도 밝 / 어
 parser.add_argument('--appearance_embedding_dim', type=int, default=48)
-parser.add_argument('--transient_embedding_word', type=int, default=20)
+parser.add_argument('--transient_embedding_word', type=int, default=56) # appearance embedding vector의 dim = 2 -> 조도 밝 / 어
 parser.add_argument('--transient_embedding_dim', type=int, default=16)
 
 # save path

@@ -99,8 +99,8 @@ class Solver(object):
     def basic_setting(self): # Q. 2개의 network를 학습?
         # TODO : 학습해야 하는 appearance embedding vector + transient embedding vector
         # TODO : coarse model만 먼저 학습해보기 -> Debugging
-        self.appearance_embedding_vector = torch.nn.Embedding(20, self.appearance_channel) # image 개수대로 appearance embedding vector 생성
-        self.transient_embedding_vector = torch.nn.Embedding(20, self.transient_channel) # image 개수대로 transient embedding vector 생성
+        self.appearance_embedding_vector = torch.nn.Embedding(190, self.appearance_channel) # image 개수대로 appearance embedding vector 생성
+        self.transient_embedding_vector = torch.nn.Embedding(190, self.transient_channel) # image 개수대로 transient embedding vector 생성
         
         # model -> Coarse + Fine
         # Coarse + Fine Network
@@ -284,6 +284,7 @@ class Solver(object):
             s = 0
             for idx, [rays, view_dirs, rays_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
             # for idx, [rays, view_dirs] in enumerate(self.data_loader):
+                print("hello")
                 rays = rays.float()
                 view_dirs = view_dirs.float()
                 batch_size = rays.shape[0]

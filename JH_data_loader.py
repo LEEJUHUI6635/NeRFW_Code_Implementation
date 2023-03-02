@@ -39,11 +39,12 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
         self.bd_factor = bd_factor # ***
         self.appearance_embedded = appearance_embedded
         self.transient_embedded = transient_embedded
+        self.custom_dataset = True # TODO : user setting
         self.preprocessing() # Test
         self.load_images() # appearance embedding x, transient embedding x
         self.pre_poses() # Test
         self.spiral_path() # Test
-        
+
     def preprocessing(self):
         # poses_bounds.npy 파일에서 pose와 bds를 얻는다.
         poses_bounds = np.load(os.path.join(self.base_dir, 'poses_bounds.npy'))
@@ -69,31 +70,41 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
             # appearance embedding + transient embedding
             # TODO : appearance embedding과 transient embedding 따로 처리
             elif self.appearance_embedded == True and self.transient_embedded == True: # NeRF in the wild
-                np.random.seed(idx) # image에 따른 random seed
-                # appearance embedding
-                # normalize
-                images_norm = images_RGB / 255 # normalization -> 0 ~ 1
-                scale = np.random.uniform(low=0.8, high=1.2, size=3)
-                bias = np.random.uniform(low=-0.2, high=0.2, size=3)
-                images_norm = np.clip(scale*images_norm+bias, 0, 1)
-                images_distorted = np.uint8(255*images_norm)
+                if self.custom_dataset == False:
+                    np.random.seed(idx) # image에 따른 random seed
+                    # appearance embedding
+                    # normalize
+                    images_norm = images_RGB / 255 # normalization -> 0 ~ 1
+                    scale = np.random.uniform(low=0.8, high=1.2, size=3)
+                    bias = np.random.uniform(low=-0.2, high=0.2, size=3)
+                    images_norm = np.clip(scale*images_norm+bias, 0, 1)
+                    images_distorted = np.uint8(255*images_norm)
 
-                # transient embedding
-                # images_distorted numpy -> PIL
-                images_distorted = Image.fromarray(images_distorted)
-                draw = ImageDraw.Draw(images_distorted)
-                left = np.random.randint(self.width//4, self.width//2) # width의 1/4 ~ 1/2
-                top = np.random.randint(self.height//4, self.height//2) # height의 1/4 ~ 1/2
-                for i in range(10):
-                    np.random.seed(10*idx+i)
-                    random_color = tuple(np.random.choice(range(256), 3))
-                    draw.rectangle(((left+self.width//40*i, top), (left+self.width//40*(i+1), top+self.width//4)), fill=random_color) # user parameter
-            
-                # images_distorted PIL -> numpy
-                images_distorted = np.array(images_distorted)
-                images_resize = cv.resize(images_distorted, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서
-                images_norm = images_resize / 255 # normalization
-                images_list.append(images_norm)        
+                    # transient embedding
+                    # images_distorted numpy -> PIL
+                    images_distorted = Image.fromarray(images_distorted)
+                    draw = ImageDraw.Draw(images_distorted)
+                    left = np.random.randint(self.width//4, self.width//2) # width의 1/4 ~ 1/2
+                    top = np.random.randint(self.height//4, self.height//2) # height의 1/4 ~ 1/2
+                    for i in range(10):
+                        np.random.seed(10*idx+i)
+                        random_color = tuple(np.random.choice(range(256), 3))
+                        draw.rectangle(((left+self.width//40*i, top), (left+self.width//40*(i+1), top+self.width//4)), fill=random_color) # user parameter
+                
+                    # images_distorted PIL -> numpy
+                    images_distorted = np.array(images_distorted)
+                    images_resize = cv.resize(images_distorted, dsize=(self.width // self.factor, self.height // self.factor)) # width, height 순서
+                    images_norm = images_resize / 255 # normalization
+                    images_list.append(images_norm)
+                elif self.custom_dataset == True:
+                    print('------------------- custom dataset -------------------')
+                    # 먼저, transient embedding vector는 고려 x, appearance embedding vector만 고려 o
+                    # 기존의 밝은 dataset -> 절반 정도의 dataset(번갈아가면서 -> TODO : idx가 홀수인 경우) -> 어둡게 만든다.
+                    # TODO : 더 사실적으로 어둡게 만들기
+                    images_norm = images_RGB / 255
+                    if idx % 2 != 0:
+                        images_norm = np.clip(images_norm - 0.45, 0, 1) # TODO : 0.45 -> user setting
+                    images_list.append(images_norm)
         self.images = np.array(images_list)
 
     def pre_poses(self): # bds_factor에 대해 rescale을 처리해야 한다.
@@ -279,6 +290,7 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
 
         # 하나의 image에 대한 모든 픽셀의 ray에 대한 원점은 같아야 한다. ray는 3D point에서 2D point로 향하는 방향이다.
         rays_o = np.broadcast_to(pose[:3,3], rays_d.shape)
+        print("1")
         return rays_o, rays_d # world 좌표계로 표현
     
     # NDC -> projection matrix
@@ -328,6 +340,7 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             self.rays_rgb_list_no_ndc = [self.rays_rgb_list_no_ndc[i].reshape(2, 3) for i in range(len(self.rays_rgb_list_no_ndc))]
         
         self.view_dirs_list = [self.rays_rgb_list_no_ndc[i][1:2,:] for i in range(len(self.rays_rgb_list_no_ndc))]
+        print("2")
         
     def ndc_all_rays(self): # ndc 처리
         rays_list = []
@@ -356,6 +369,7 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.val_idx]
         rays_t_arr = torch.cat(rays_t_list, dim=0)
         self.rays_t_list = [rays_t_arr[i] for i in range(len(rays_t_arr))]
+        print("3")
         
     def __len__(self): # should be iterable
         return len(self.rays_rgb_list_no_ndc)
@@ -416,5 +430,6 @@ class Rays_DATALOADER(object):
         self.drop_last = drop_last # 나중에 train이면 drop_last = True / validation 혹은 test이면 drop_last = False 되게끔 만들기 !
         
     def data_loader(self): # shuffle = False
+        print("4")
         dataloader = DataLoader(dataset=self.results, batch_size=self.batch_size, shuffle = self.shuffle, num_workers=4, pin_memory=True, drop_last=False) # drop_last = False -> 마지막 batch 또한 학습한다.
         return dataloader
