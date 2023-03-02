@@ -99,8 +99,9 @@ class Solver(object):
     def basic_setting(self): # Q. 2개의 network를 학습?
         # TODO : 학습해야 하는 appearance embedding vector + transient embedding vector
         # TODO : coarse model만 먼저 학습해보기 -> Debugging
-        self.appearance_embedding_vector = torch.nn.Embedding(190, self.appearance_channel) # image 개수대로 appearance embedding vector 생성
-        self.transient_embedding_vector = torch.nn.Embedding(190, self.transient_channel) # image 개수대로 transient embedding vector 생성
+        # TODO : 2, 56 -> 
+        self.appearance_embedding_vector = torch.nn.Embedding(self.appearance_embedding_word, self.appearance_channel) # image 개수대로 appearance embedding vector 생성
+        self.transient_embedding_vector = torch.nn.Embedding(self.transient_embedding_word, self.transient_channel) # image 개수대로 transient embedding vector 생성
         
         # model -> Coarse + Fine
         # Coarse + Fine Network
@@ -282,7 +283,7 @@ class Solver(object):
         for epoch in tqdm.tqdm(range(start_iters, self.nb_epochs)):
             # Dataloader -> 1024로 나눠 학습
             s = 0
-            for idx, [rays, view_dirs, rays_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
+            for idx, [rays, view_dirs, rays_t, rays_appearance_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
             # for idx, [rays, view_dirs] in enumerate(self.data_loader):
                 print("hello")
                 rays = rays.float()
@@ -309,7 +310,7 @@ class Solver(object):
                 coarse_view_dirs = coarse_view_dirs.to(self.device)
 
                 # Appearance embedding + Transient embedding
-                appearance_embedded = self.appearance_embedding_vector(rays_t) # [1024, 48]
+                appearance_embedded = self.appearance_embedding_vector(rays_appearance_t) # [1024, 48]
                 appearance_embedded = appearance_embedded.reshape(batch_size, 1, self.appearance_channel)
                 appearance_embedded = appearance_embedded.repeat(1, self.coarse_num, 1) # [1024, 64, 48]
                 appearance_embedded = appearance_embedded.reshape(-1, self.appearance_channel).to(self.device)
@@ -356,7 +357,7 @@ class Solver(object):
                 
                 # TODO : embedding vector를 어디에서 정의해야 하는가?
                 # Appearance embedding + Transient embedding
-                appearance_fine_embedded = self.appearance_embedding_vector(rays_t)
+                appearance_fine_embedded = self.appearance_embedding_vector(rays_appearance_t)
                 appearance_fine_embedded = appearance_fine_embedded.reshape(batch_size, 1, self.appearance_channel)
                 appearance_fine_embedded = appearance_fine_embedded.repeat(1, self.coarse_num + self.fine_num, 1) # [1024, 64, 48]
                 appearance_fine_embedded = appearance_fine_embedded.reshape(-1, self.appearance_channel).to(self.device)
@@ -391,7 +392,7 @@ class Solver(object):
                 # psnr = self.psnr(loss) # psnr 조금 수정해야 할 듯.
                 # print(rays.shape) # [1024, 3, 3]
                 # iteration n번 마다 출력
-                print(idx, loss, rays_t)
+                print(idx, loss, rays_t, rays_appearance_t)
                 # print(fine_rgb_2d.shape) # [1024, 3]
                 if idx == 0:
                     train_image_arr = fine_rgb_2d

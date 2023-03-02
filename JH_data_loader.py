@@ -104,6 +104,8 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
                     images_norm = images_RGB / 255
                     if idx % 2 != 0:
                         images_norm = np.clip(images_norm - 0.45, 0, 1) # TODO : 0.45 -> user setting
+                    # images_distorted = np.uint8(255*images_norm)
+                    # cv.imwrite('results/train/train_data_{}.png'.format(idx), images_distorted)
                     images_list.append(images_norm)
         self.images = np.array(images_list)
 
@@ -245,7 +247,9 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
                     # print(val_idx) 
                 else: # image frame id
                     self.train_idx.append(i) # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19]
-        
+            # print('train_idx', self.train_idx)
+            # print('val_idx', self.val_idx) # [0, 30]
+            
             if self.train == True: # Train
                 self.pose = self.pose[self.train_idx,:,:]
                 # self.images = self.images[train_idx,:,:,:]
@@ -365,10 +369,17 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
     def embedding_vector(self): # Q. 이미지에 따른 appearance embeddding vector + transient embedding vector를 만들기 위한 rays_t index
         if self.test == False and self.train == True: # train
             rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
+            # appearance embedding vector -> 0 or 1, 0 -> 밝은 조도 상황, 1 -> 어두운 조도 상황
+            # TODO : self.custom == True
+            rays_appearance_t_list = [0 * torch.ones(self.height * self.width, dtype=torch.long) if i % 2 == 0 else 1 * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
         elif self.test == False and self.train == False: # validation
             rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.val_idx]
         rays_t_arr = torch.cat(rays_t_list, dim=0)
         self.rays_t_list = [rays_t_arr[i] for i in range(len(rays_t_arr))]
+        if self.test == False and self.train == True: # train
+            rays_appearance_t_arr = torch.cat(rays_appearance_t_list, dim=0)
+            self.rays_appearance_t_list = [rays_appearance_t_arr[i] for i in range(len(rays_appearance_t_arr))]
+        
         print("3")
         
     def __len__(self): # should be iterable
@@ -383,8 +394,14 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
         view_dirs = self.view_dirs_list[index] # Debugging -> test시에는 없다.
         if self.test == False:
             rays_t = self.rays_t_list[index]
+            if self.train == True:
+                rays_appearance_t = self.rays_appearance_t_list[index]
             # rays_t 추가
-            results = [samples, view_dirs, rays_t]
+            if self.train == False: # validation
+                results = [samples, view_dirs, rays_t]
+            elif self.train == True: # train
+                results = [samples, view_dirs, rays_t, rays_appearance_t]
+                
             # return samples, view_dirs # rays_o + rays_d + rgb
         elif self.test == True:
             results = [samples, view_dirs]
