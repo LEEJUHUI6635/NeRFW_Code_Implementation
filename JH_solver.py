@@ -283,9 +283,10 @@ class Solver(object):
         for epoch in tqdm.tqdm(range(start_iters, self.nb_epochs)):
             # Dataloader -> 1024로 나눠 학습
             s = 0
-            for idx, [rays, view_dirs, rays_t, rays_appearance_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
+            for idx, [rays, view_dirs, rays_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
             # for idx, [rays, view_dirs] in enumerate(self.data_loader):
-                print("hello")
+                # print(rays_t.shape) # 2048 -> batch_size
+
                 rays = rays.float()
                 view_dirs = view_dirs.float()
                 batch_size = rays.shape[0]
@@ -308,6 +309,13 @@ class Solver(object):
                 coarse_view_dirs = Positional_Encoding(self.L_dirs).outputs(coarse_view_dirs) # viewing direction
                 coarse_pts = coarse_pts.to(self.device)
                 coarse_view_dirs = coarse_view_dirs.to(self.device)
+
+                # 조도 환경이 밝은 경우 -> 0
+                # 조도 환경이 어두운 경우 -> 1
+                # rays_appearance_t_list = [0 * torch.ones(self.height * self.width, dtype=torch.long) if i % 2 == 0 else 1 * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
+                # rays_t -> [2048] -> 2048개의 train idx 각각이 홀수라면 1(어두운 경우), 각각이 짝수라면 0(밝은 경우)
+                rays_appearance_t = [0 * torch.ones(1, dtype=torch.long) if rays_t[i].item() % 2 == 0 else 1 * torch.ones(1, dtype=torch.long) for i in range(rays_t.shape[0])]
+                rays_appearance_t = torch.cat(rays_appearance_t, dim=0)
 
                 # Appearance embedding + Transient embedding
                 appearance_embedded = self.appearance_embedding_vector(rays_appearance_t) # [1024, 48]
@@ -415,11 +423,11 @@ class Solver(object):
             print('----{}s seconds----'.format(time.time() - start_time))
             
             # # Learning rate decay -> self.optimizer에도 적용되어야 한다.
-            # decay_rate = 0.1
-            # decay_steps = 250 * 1000
-            # new_lrate = self.learning_rate * (decay_rate ** (epoch / decay_steps))
-            # for param_group in self.optimizer.param_groups:
-            #     param_group['lr'] = new_lrate
+            decay_rate = 0.1
+            decay_steps = 250 * 1000
+            new_lrate = self.learning_rate * (decay_rate ** (epoch / decay_steps))
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = new_lrate
 
             # 한 epoch마다 model, optimizer 저장 -> 15 epoch마다
             # Save_Checkpoints -> 하나로 합치기
@@ -429,7 +437,7 @@ class Solver(object):
                 Save_Checkpoints(epoch, self.appearance_embedding_vector, None, None, self.save_appearance_embedding_path, 'embedding')
                 Save_Checkpoints(epoch, self.transient_embedding_vector, None, None, self.save_transient_embedding_path, 'embedding')
                 Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
-                # Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
+                Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
             
             # # Validation -> Validataion Dataloader = rays + NDC space 전에 추출한 get_rays의 view_dirs -> Train과 똑같이 처리한다. 다만, rays_rgb는 가져올 필요 없다.
             # if epoch % self.save_val_iters == 0 and epoch > 0: # if epoch % 10 == 0 and epoch > 0:

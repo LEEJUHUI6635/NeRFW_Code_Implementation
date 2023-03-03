@@ -97,7 +97,6 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
                     images_norm = images_resize / 255 # normalization
                     images_list.append(images_norm)
                 elif self.custom_dataset == True:
-                    print('------------------- custom dataset -------------------')
                     # 먼저, transient embedding vector는 고려 x, appearance embedding vector만 고려 o
                     # 기존의 밝은 dataset -> 절반 정도의 dataset(번갈아가면서 -> TODO : idx가 홀수인 경우) -> 어둡게 만든다.
                     # TODO : 더 사실적으로 어둡게 만들기
@@ -204,6 +203,7 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
 # NeRF-W : rays_t -> 해당 ray가 어떠한 이미지에 속하는지에 대한 정보도 추가해야 한다.
 # poses <- poses : Train or Validation / poses <- render_poses : Test
 # TODO : NDC space optional
+# TODO : dataloader -> GPU utils를 높이도록 설계
 class Rays_DATASET(Dataset): # parameter -> kwargs
     def __init__(self, 
                  height, 
@@ -294,7 +294,6 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
 
         # 하나의 image에 대한 모든 픽셀의 ray에 대한 원점은 같아야 한다. ray는 3D point에서 2D point로 향하는 방향이다.
         rays_o = np.broadcast_to(pose[:3,3], rays_d.shape)
-        print("1")
         return rays_o, rays_d # world 좌표계로 표현
     
     # NDC -> projection matrix
@@ -344,7 +343,6 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             self.rays_rgb_list_no_ndc = [self.rays_rgb_list_no_ndc[i].reshape(2, 3) for i in range(len(self.rays_rgb_list_no_ndc))]
         
         self.view_dirs_list = [self.rays_rgb_list_no_ndc[i][1:2,:] for i in range(len(self.rays_rgb_list_no_ndc))]
-        print("2")
         
     def ndc_all_rays(self): # ndc 처리
         rays_list = []
@@ -371,20 +369,19 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
             # appearance embedding vector -> 0 or 1, 0 -> 밝은 조도 상황, 1 -> 어두운 조도 상황
             # TODO : self.custom == True
-            rays_appearance_t_list = [0 * torch.ones(self.height * self.width, dtype=torch.long) if i % 2 == 0 else 1 * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
+            # rays_appearance_t_list = [0 * torch.ones(self.height * self.width, dtype=torch.long) if i % 2 == 0 else 1 * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
         elif self.test == False and self.train == False: # validation
             rays_t_list = [i * torch.ones(self.height * self.width, dtype=torch.long) for i in self.val_idx]
         rays_t_arr = torch.cat(rays_t_list, dim=0)
         self.rays_t_list = [rays_t_arr[i] for i in range(len(rays_t_arr))]
-        if self.test == False and self.train == True: # train
-            rays_appearance_t_arr = torch.cat(rays_appearance_t_list, dim=0)
-            self.rays_appearance_t_list = [rays_appearance_t_arr[i] for i in range(len(rays_appearance_t_arr))]
-        
-        print("3")
+        # if self.test == False and self.train == True: # train
+        #     rays_appearance_t_arr = torch.cat(rays_appearance_t_list, dim=0)
+        #     self.rays_appearance_t_list = [rays_appearance_t_arr[i] for i in range(len(rays_appearance_t_arr))]
         
     def __len__(self): # should be iterable
         return len(self.rays_rgb_list_no_ndc)
-        
+    
+    # TODO : GPU utils를 높이기 위해서는 getitem에 많은 것을 구현 x
     def __getitem__(self, index): # should be iterable
         if self.ndc_space == True:
             samples = self.rays_rgb_list_ndc[index]
@@ -392,16 +389,16 @@ class Rays_DATASET(Dataset): # parameter -> kwargs
             samples = self.rays_rgb_list_no_ndc[index]
             
         view_dirs = self.view_dirs_list[index] # Debugging -> test시에는 없다.
-        if self.test == False:
+        if self.test == False: # train or validation
             rays_t = self.rays_t_list[index]
-            if self.train == True:
-                rays_appearance_t = self.rays_appearance_t_list[index]
-            # rays_t 추가
-            if self.train == False: # validation
-                results = [samples, view_dirs, rays_t]
-            elif self.train == True: # train
-                results = [samples, view_dirs, rays_t, rays_appearance_t]
-                
+            # if self.train == True:
+            #     rays_appearance_t = self.rays_appearance_t_list[index]
+            # # rays_t 추가
+            # if self.train == False: # validation
+            #     results = [samples, view_dirs, rays_t]
+            # elif self.train == True: # train
+            #     results = [samples, view_dirs, rays_t, rays_appearance_t]
+            results = [samples, view_dirs, rays_t]
             # return samples, view_dirs # rays_o + rays_d + rgb
         elif self.test == True:
             results = [samples, view_dirs]
@@ -447,6 +444,5 @@ class Rays_DATALOADER(object):
         self.drop_last = drop_last # 나중에 train이면 drop_last = True / validation 혹은 test이면 drop_last = False 되게끔 만들기 !
         
     def data_loader(self): # shuffle = False
-        print("4")
         dataloader = DataLoader(dataset=self.results, batch_size=self.batch_size, shuffle = self.shuffle, num_workers=4, pin_memory=True, drop_last=False) # drop_last = False -> 마지막 batch 또한 학습한다.
         return dataloader

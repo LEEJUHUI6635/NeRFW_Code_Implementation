@@ -19,13 +19,13 @@ parser = argparse.ArgumentParser(description='NeRF-W Implementation by JH')
 # LLFF
 parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/JH_nerf_w_2_geo')
 parser.add_argument('--factor', type=int, default=1) # factor = 1 -> killed
-parser.add_argument('--batch_size', type=int, default=1024)
+parser.add_argument('--batch_size', type=int, default=2048)
 parser.add_argument('--ndc_space', type=bool, default=True)
 
 # train
 parser.add_argument('--resume_iters', type=int, default=None)
 parser.add_argument('--mode', type=str, default='Train', choices=['Train', 'Test']) # list 형식으로 만들기
-parser.add_argument('--nb_epochs', type=int, default=1000) # 60 epoch = 20000 iterations
+parser.add_argument('--nb_epochs', type=int, default=900) # 60 epoch = 20000 iterations
 parser.add_argument('--save_val_iters', type=int, default=5) # 1 epoch마다 validation 수행
 parser.add_argument('--save_model_iters', type=int, default=5)
 
