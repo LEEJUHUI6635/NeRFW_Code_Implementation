@@ -126,7 +126,9 @@ class Hierarchical_Sampling(object):
 # transient density -> softplus
 # uncertainty -> softplus
 
-# TODO : 각 output의 activation function 확인
+# Coarse -> appearance_channel = 0
+# Fine -> appearance_channel = 48
+
 class NeRF(nn.Module):
     def __init__(self, pts_channel, output_channel, dir_channel, appearance_channel, transient_channel, batch_size, sample_num, device):
         super(NeRF, self).__init__()
@@ -154,11 +156,17 @@ class NeRF(nn.Module):
         # position input을 받는 network
         # appearance embedding input과 viewing direction input을 받는 network
         # transient embedding input을 받는 network
+        
         self.residual()
         self.main()
         self.appearance()
         self.transient()
     
+    # Coarse model : position(pts) -> 첫 번째 MLP -> static density, viewing direction -> 두 번째 MLP -> static rgb
+    # Fine model : position(pts) -> 첫 번째 MLP -> static density, appearance embedding vector + viewing direction -> 두 번째 MLP -> static rgb,
+    # transient embedding vector + 첫 번째 MLP의 feature vector -> 세 번째 MLP -> uncertainty, transient rgb, transient density
+    
+    # Coarse + Fine
     # skip connection
     def residual(self):
         # residual learning
@@ -171,6 +179,7 @@ class NeRF(nn.Module):
             self.residual_list.append(nn.ReLU(inplace=True))
         self.residual_block = nn.Sequential(*self.residual_list)
     
+    # Coarse + Fine
     def main(self):
         self.main_list = []
         self.main_list.append(nn.Linear(in_features=self.pts_channel + self.hidden_channel, out_features=self.hidden_channel))
@@ -179,13 +188,16 @@ class NeRF(nn.Module):
             self.main_list.append(nn.Linear(in_features=self.hidden_channel, out_features=self.hidden_channel))
             self.main_list.append(nn.ReLU(inplace=True))
         self.main_block = nn.Sequential(*self.main_list)
-        
+    
+    # Coarse -> viewing direction만 input으로 받는다.
+    # Fine -> viewing direction + appearance embedding vector를 input으로 받는다.
     def appearance(self):
         self.appearance_list = []
         self.appearance_list.append(nn.Linear(self.appearance_channel + self.dir_channel + self.hidden_channel, self.hidden2_channel)) # 48 + 27 + 256
         self.appearance_list.append(nn.ReLU(inplace=True))
         self.appearance_block = nn.Sequential(*self.appearance_list)
-        
+    
+    # Fine
     def transient(self):
         self.transient_list = []
         self.transient_list.append(nn.Linear(self.hidden_channel + self.transient_channel, self.hidden2_channel)) # 256 + 16
@@ -194,7 +206,8 @@ class NeRF(nn.Module):
             self.transient_list.append(nn.Linear(self.hidden2_channel, self.hidden2_channel))
             self.transient_list.append(nn.ReLU(inplace=True))
         self.transient_block = nn.Sequential(*self.transient_list)
-        
+    
+    # TODO : coarse model -> 기존의 NeRF와 같이, positional encoding -> position(pts) + viewing direction / fine model -> position(pts) + viewing direction + appearance embedding vector + transient embedding vector
     def forward(self, x, sampling): # forward() : gradient의 학습을 결정 -> coarse와 fine을 한 개로 통일해야 한다.
         # input -> pts + viewing_dirs + appearance embedding vector + transient embedding vector
         # coarse -> [65536, 154] = [1024 x 64, 63 + 27 + 48 + 16] / fine -> [131072, 154] = [1024 x 128, 63 + 27 + 48 + 16]
@@ -203,48 +216,68 @@ class NeRF(nn.Module):
             sample_num = 64 # TODO : 변수로 치환
         elif sampling.lower() == 'fine':
             sample_num = 128 # TODO : 변수로 치환
-        # input -> pts, dirs, appearance embedding vector, transient embedding vector
+            
+        # coarse input -> pts, dirs
+        # fine input -> pts, dirs, appearance embedding vector, transient embedding vector
+        
         pts = x[:,:self.pts_channel] # 63
         acc_channel = self.pts_channel
         dirs = x[:,acc_channel:acc_channel+self.dir_channel] # 27
         acc_channel += self.dir_channel
-        appearance_embedding = x[:,acc_channel:acc_channel+self.appearance_channel] # 48
-        acc_channel += self.appearance_channel
-        transient_embedding = x[:,acc_channel:] # 16
         
+        if sampling.lower() == 'fine':
+            appearance_embedding = x[:,acc_channel:acc_channel+self.appearance_channel] # 48
+            acc_channel += self.appearance_channel
+            transient_embedding = x[:,acc_channel:] # 16
+        
+        # Coarse model + Fine model
         # residual learning
         feature = self.residual_block(pts) # [65536, 256]
         feature = torch.cat([pts, feature], dim=1) # [65536, 63 + 256]
+        # feature2 -> 두 번째 MLP -> static rgb
         feature2 = self.main_block(feature) # [65536, 256]
+        
+        # Coarse model -> input : viewing direction + feature2
+        # Fine model -> input : appearance embedding + viewing direction + feature2
         # appearance block의 input
         # debugging
-        appearance_input = torch.cat([appearance_embedding, dirs, feature2], dim=1)
-        # print(appearance_input.shape) # [65536, 331], 331 = 48 + 27 + 256
+        if sampling.lower() == 'coarse':
+            appearance_input = torch.cat([dirs, feature2], dim=1)
+            # print(appearance_input.shape) # [65536, 331], 331 = 48 + 27 + 256
+        elif sampling.lower() == 'fine':
+            appearance_input = torch.cat([appearance_embedding, dirs, feature2], dim=1)
+            
         feature3 = self.appearance_block(appearance_input)
         static_rgb_outputs = self.static_rgb_outputs(feature3)
 
         # static density
+        # Debugging
         static_density_outputs = self.static_density_outputs(feature2) # [65536, 3]
         
-        # transient block의 input
-        transient_input = torch.cat([transient_embedding, feature2], dim=1)
-        # print(transient_input.shape) # [65536, 272], 272 = 256 + 16
-        feature4 = self.transient_block(transient_input)
-
-        # uncertainty
-        uncertainty_outputs = self.uncertainty_outputs(feature4)
-        # transient rgb
-        transient_rgb_outputs = self.transient_rgb_outputs(feature4)
-        # transient density
-        transient_density_outputs = self.transient_density_outputs(feature4)
+        # Fine model
+        if sampling.lower() == 'fine':
+            # transient block의 input
+            transient_input = torch.cat([transient_embedding, feature2], dim=1)
+            # print(transient_input.shape) # [65536, 272], 272 = 256 + 16
+            feature4 = self.transient_block(transient_input)
+            # uncertainty
+            uncertainty_outputs = self.uncertainty_outputs(feature4)
+            # transient rgb
+            transient_rgb_outputs = self.transient_rgb_outputs(feature4)
+            # transient density
+            transient_density_outputs = self.transient_density_outputs(feature4)
         
         # static + transient
         static_outputs = torch.cat([static_rgb_outputs, static_density_outputs], dim=1)
+        
+        if sampling.lower() == 'coarse':
+            outputs = static_outputs.reshape([x.shape[0] // sample_num, sample_num, -1])
+            return outputs # [1024, 64, 4]
+        
+        # Fine model
         transient_outputs = torch.cat([uncertainty_outputs, transient_rgb_outputs, transient_density_outputs], dim=1)
-        # print(static_outputs.shape) # [65536, 4]
-        # print(transient_outputs.shape) # [65536, 5]
 
         outputs = torch.cat([static_outputs, transient_outputs], dim=1) # [65536, 9], 9 = 3 + 1 + 3 + 1 + 1
-        outputs = outputs.reshape([x.shape[0] // sample_num, sample_num, self.output_channel]) # [1024, 64, 9]
+        outputs = outputs.reshape([x.shape[0] // sample_num, sample_num, self.output_channel]) # [1024, 128, 9]
         
         return outputs

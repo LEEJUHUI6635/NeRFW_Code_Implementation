@@ -15,7 +15,7 @@ import sys
 
 # Checkpoints 저장 -> epoch 마다 저장 or 마지막 epoch만 저장
 class Save_Checkpoints(object):
-    def __init__(self, epoch, model, optimizer, loss, save_path, select='epoch'): # select -> epoch or last
+    def __init__(self, epoch, model, optimizer, loss, save_path, select='model'): # select -> model or embedding
         # epoch, model_state_dict, optimizer_state_dict, loss 저장
         self.epoch = epoch
         self.model = model
@@ -24,23 +24,16 @@ class Save_Checkpoints(object):
         self.save_path = save_path
         self.select = select
         # epoch 마다 저장 or 마지막 epoch만 저장 -> optional
-        if self.select == 'epoch':
-            self.save_checkpoints_epoch()
-        elif self.select == 'last':
-            self.save_checkpoints_last()
+        if self.select == 'model':
+            self.save_checkpoints_model()
         elif self.select == 'embedding':
             self.save_checkpoints_embedding()
             
-    def save_checkpoints_epoch(self):
+    def save_checkpoints_model(self):
         torch.save({'epoch': self.epoch, 
                     'model': self.model.state_dict(), 
                     'optimizer': self.optimizer.state_dict(), 
                     'loss': self.loss}, os.path.join(self.save_path, 'checkpoints_{}.pt'.format(self.epoch))) # self.save_path + 'checkpoints_{}.pt'
-    def save_checkpoints_last(self):
-        torch.save({'epoch': self.epoch,
-                    'model': self.model.state_dict(),
-                    'optimizer': self.optimizer.state_dict(),
-                    'loss': self.loss}, os.path.join(self.save_path, 'checkpoints_last.pt'))
     def save_checkpoints_embedding(self):
         torch.save({'epoch': self.epoch,
                     'model': self.model.state_dict()}, os.path.join(self.save_path, 'checkpoints_{}.pt'.format(self.epoch)))
@@ -67,6 +60,9 @@ class Solver(object):
         self.learning_rate = config.learning_rate
         
         # appearance embedding vector, transient embedding vector
+        self.appearance_embedded = config.appearance_embedded
+        self.transient_embedded = config.transient_embedded
+        self.custom_dataset = config.custom_dataset
         self.appearance_embedding_word = config.appearance_embedding_word
         self.transient_embedding_word = config.transient_embedding_word
         self.appearance_channel = config.appearance_embedding_dim
@@ -99,23 +95,28 @@ class Solver(object):
     def basic_setting(self): # Q. 2개의 network를 학습?
         # TODO : 학습해야 하는 appearance embedding vector + transient embedding vector
         # TODO : coarse model만 먼저 학습해보기 -> Debugging
-        # TODO : 2, 56 -> 
-        self.appearance_embedding_vector = torch.nn.Embedding(self.appearance_embedding_word, self.appearance_channel) # image 개수대로 appearance embedding vector 생성
-        self.transient_embedding_vector = torch.nn.Embedding(self.transient_embedding_word, self.transient_channel) # image 개수대로 transient embedding vector 생성
+        if self.appearance_embedded == True:
+            self.appearance_embedding_vector = torch.nn.Embedding(self.appearance_embedding_word, self.appearance_channel) # image 개수대로 appearance embedding vector 생성
+        if self.transient_embedded == True:
+            self.transient_embedding_vector = torch.nn.Embedding(self.transient_embedding_word, self.transient_channel) # image 개수대로 transient embedding vector 생성
         
         # model -> Coarse + Fine
         # Coarse + Fine Network
         # 고민 -> 두 개의 network가 아니라 한 개의 network를 학습해야 하는 것이 아닌가? 즉, forward 부분도 하나로 통일해야 gradient가 한 번에 학습되는 것이 아닌가?
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        self.coarse_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, 0, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        # self.coarse_model = torch.nn.DataParallel(self.coarse_model, device_ids=self.device)
         grad_variables = list(self.coarse_model.parameters())
         
         self.fine_model = NeRF(self.pts_channel, self.output_channel, self.dir_channel, self.appearance_channel, self.transient_channel, self.batch_size, self.sample_num, self.device).to(self.device)
+        # self.fine_model = torch.nn.DataParallel(self.fine_model, device_ids=self.device)
         grad_variables += list(self.fine_model.parameters())
         
         # appearance embedding vector + transient embedding vector -> 학습 대상에 추가
-        grad_variables += list(self.appearance_embedding_vector.parameters())
-        grad_variables += list(self.transient_embedding_vector.parameters())
+        if self.appearance_embedded == True:
+            grad_variables += list(self.appearance_embedding_vector.parameters())
+        if self.transient_embedded == True:
+            grad_variables += list(self.transient_embedding_vector.parameters())
         
         # optimizer
         self.optimizer = optim.Adam(params=grad_variables, lr=self.learning_rate, betas=(0.9, 0.999))
@@ -206,61 +207,121 @@ class Solver(object):
         
     #     return rgb_2d, weights, beta
     
-    # TODO : nerf_pl의 classic volume rendering 가져와서 비교
-    def classic_volume_rendering(self, raw, z_vals, rays, device):
+    # TODO : GPU-utils 높이고 CPU-utils 낮추기 위해, classic volume rendering 수식에서 device 사용 x
+    # TODO : Coarse model -> static_rgb_2d, static_density / Fine model -> static_rgb_2d, static_density, uncertainty, transient_rgb_2d, transient_density
+    def classic_volume_rendering(self, raw, z_vals, rays, sampling):
+        # Coarse network -> input : raw = [rgb_3d, density],
+        # Fine network -> input : raw = [static_rgb_3d, static_density, uncertainty, transient_rgb_3d, transient_density]
         rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
-        raw = raw.to(self.device) # [static_rgb_outputs, static_density_outputs, uncertainty_outputs, transient_rgb_outputs, transient_density_outputs]
-        z_vals = z_vals.to(self.device)
-        rays = rays.to(self.device)
-        rays_d = rays_d.to(self.device)
         
         # static
         static_rgb_3d = torch.sigmoid(raw[:,:,:3]) # [1024, 64, 3]
-        static_rgb_3d = static_rgb_3d.to(self.device)
         static_density = raw[:,:,3:4] # [1024, 64, 1]
-        static_density = static_density.to(self.device)
         
-        # transient
-        transient_rgb_3d = torch.sigmoid(raw[:,:,5:8]) # [1024, 64, 3]
-        transient_rgb_3d = transient_rgb_3d.to(self.device)
-        transient_density = raw[:,:,8:] # [1024, 64, 1]
-        transient_density = transient_density.to(self.device)
-        uncertainty = raw[:,:,4:5] # [1024, 64, 1]
-        uncertainty = uncertainty.to(self.device)
+        if sampling.lower() == 'fine':
+            # transient
+            transient_rgb_3d = torch.sigmoid(raw[:,:,5:8]) # [1024, 64, 3]
+            transient_density = raw[:,:,8:] # [1024, 64, 1]
+            uncertainty = raw[:,:,4:5] # [1024, 64, 1]
         
         deltas = z_vals[:, 1:] - z_vals[:, :-1] # (N_rays, N_samples_-1)
         delta_inf = 1e2 * torch.ones_like(deltas[:, :1]) # (N_rays, 1) the last delta is infinity
         deltas = torch.cat([deltas, delta_inf], -1)  # (N_rays, N_samples_)
         # print(deltas.shape) # [2048, 64]
         # print(static_density.shape) # [2048, 64, 1]
-        static_alphas = 1-torch.exp(-deltas*static_density.squeeze()) # static alpha compositing
-        transient_alphas = 1-torch.exp(-deltas*transient_density.squeeze()) # transient alpha compositing
-        alphas = 1-torch.exp(-deltas*(static_density.squeeze()+transient_density.squeeze()))
+        
+        if sampling.lower() == 'coarse':
+            alphas = 1-torch.exp(-deltas*static_density.squeeze())
+        elif sampling.lower() == 'fine':
+            static_alphas = 1-torch.exp(-deltas*static_density.squeeze()) # static alpha compositing
+            transient_alphas = 1-torch.exp(-deltas*transient_density.squeeze()) # transient alpha compositing
+            alphas = 1-torch.exp(-deltas*(static_density.squeeze()+transient_density.squeeze()))
         
         alphas_shifted = torch.cat([torch.ones_like(alphas[:, :1]), 1-alphas], -1) # [1, 1-a1, 1-a2, ...]
         transmittance = torch.cumprod(alphas_shifted[:, :-1], -1) # [1, 1-a1, (1-a1)(1-a2), ...]
         
-        static_weights = static_alphas * transmittance
-        transient_weights = transient_alphas * transmittance
-        
+        if sampling.lower() == 'fine':
+            static_weights = static_alphas * transmittance
+            transient_weights = transient_alphas * transmittance
         weights = alphas * transmittance # weights -> 'n1 n2 -> n1', 'sum'
         
         # debugging
         # weights = torch.sum(weights, dim=1)
+        if sampling.lower() == 'coarse':
+            rgb_2d = weights.unsqueeze(dim=-1) * static_rgb_3d
+            rgb_2d = torch.sum(rgb_2d, dim=1)
+            return rgb_2d, weights
         
-        static_rgb_map = static_weights.unsqueeze(dim=-1) * static_rgb_3d
-        static_rgb_map = torch.sum(static_rgb_map, dim=1)
-        transient_rgb_map = transient_weights.unsqueeze(dim=-1) * transient_rgb_3d
-        transient_rgb_map = torch.sum(transient_rgb_map, dim=1)
-
-        beta = transient_weights * uncertainty.squeeze()
-        beta = torch.sum(beta, dim=1)
+        elif sampling.lower() == 'fine':
+            static_rgb_map = static_weights.unsqueeze(dim=-1) * static_rgb_3d
+            static_rgb_map = torch.sum(static_rgb_map, dim=1)
+            transient_rgb_map = transient_weights.unsqueeze(dim=-1) * transient_rgb_3d
+            transient_rgb_map = torch.sum(transient_rgb_map, dim=1)
+            rgb_2d = static_rgb_map + transient_rgb_map
+            
+            beta = transient_weights * uncertainty.squeeze()
+            beta = torch.sum(beta, dim=1) + 0.1
         
         # static_rgb_map = static_weights(n1 n2 -> n1 n2 1) * static_rgbs(n1 n2 c -> n1 c, sum)
         # transient_rgb_map = transient_weights(n1 n2 -> n1 n2 1) * transient_rgbs(n1 n2 c -> n1 c, sum)
         # beta = transient_weights * uncertainty(n1 n2 -> n1, sum)
-        rgb_2d = static_rgb_map + transient_rgb_map
+        
         return rgb_2d, weights, beta, static_rgb_map, transient_rgb_map
+
+    # def classic_volume_rendering(self, raw, z_vals, rays, device):
+    #     rays_d = rays[:,1:2,:] # viewing direction -> [1024, 1, 3]
+    #     raw = raw.to(self.device) # [static_rgb_outputs, static_density_outputs, uncertainty_outputs, transient_rgb_outputs, transient_density_outputs]
+    #     z_vals = z_vals.to(self.device)
+    #     rays = rays.to(self.device)
+    #     rays_d = rays_d.to(self.device)
+        
+    #     # static
+    #     static_rgb_3d = torch.sigmoid(raw[:,:,:3]) # [1024, 64, 3]
+    #     static_rgb_3d = static_rgb_3d.to(self.device)
+    #     static_density = raw[:,:,3:4] # [1024, 64, 1]
+    #     static_density = static_density.to(self.device)
+        
+    #     # transient
+    #     transient_rgb_3d = torch.sigmoid(raw[:,:,5:8]) # [1024, 64, 3]
+    #     transient_rgb_3d = transient_rgb_3d.to(self.device)
+    #     transient_density = raw[:,:,8:] # [1024, 64, 1]
+    #     transient_density = transient_density.to(self.device)
+    #     uncertainty = raw[:,:,4:5] # [1024, 64, 1]
+    #     uncertainty = uncertainty.to(self.device)
+        
+    #     deltas = z_vals[:, 1:] - z_vals[:, :-1] # (N_rays, N_samples_-1)
+    #     delta_inf = 1e2 * torch.ones_like(deltas[:, :1]) # (N_rays, 1) the last delta is infinity
+    #     deltas = torch.cat([deltas, delta_inf], -1)  # (N_rays, N_samples_)
+    #     # print(deltas.shape) # [2048, 64]
+    #     # print(static_density.shape) # [2048, 64, 1]
+    #     static_alphas = 1-torch.exp(-deltas*static_density.squeeze()) # static alpha compositing
+    #     transient_alphas = 1-torch.exp(-deltas*transient_density.squeeze()) # transient alpha compositing
+    #     alphas = 1-torch.exp(-deltas*(static_density.squeeze()+transient_density.squeeze()))
+        
+    #     alphas_shifted = torch.cat([torch.ones_like(alphas[:, :1]), 1-alphas], -1) # [1, 1-a1, 1-a2, ...]
+    #     transmittance = torch.cumprod(alphas_shifted[:, :-1], -1) # [1, 1-a1, (1-a1)(1-a2), ...]
+        
+    #     static_weights = static_alphas * transmittance
+    #     transient_weights = transient_alphas * transmittance
+        
+    #     weights = alphas * transmittance # weights -> 'n1 n2 -> n1', 'sum'
+        
+    #     # debugging
+    #     # weights = torch.sum(weights, dim=1)
+        
+    #     static_rgb_map = static_weights.unsqueeze(dim=-1) * static_rgb_3d
+    #     static_rgb_map = torch.sum(static_rgb_map, dim=1)
+    #     transient_rgb_map = transient_weights.unsqueeze(dim=-1) * transient_rgb_3d
+    #     transient_rgb_map = torch.sum(transient_rgb_map, dim=1)
+
+    #     beta = transient_weights * uncertainty.squeeze()
+    #     beta = torch.sum(beta, dim=1)
+        
+    #     # static_rgb_map = static_weights(n1 n2 -> n1 n2 1) * static_rgbs(n1 n2 c -> n1 c, sum)
+    #     # transient_rgb_map = transient_weights(n1 n2 -> n1 n2 1) * transient_rgbs(n1 n2 c -> n1 c, sum)
+    #     # beta = transient_weights * uncertainty(n1 n2 -> n1, sum)
+    #     rgb_2d = static_rgb_map + transient_rgb_map
+    #     return rgb_2d, weights, beta, static_rgb_map, transient_rgb_map
     
     # *****net_chunk*****
     def train(self): # device -> dataset, model
@@ -270,12 +331,21 @@ class Solver(object):
             # TODO : appearance embedding vector와 transient embedding vector의 checkpoints load
             coarse_ckpt = torch.load(os.path.join(self.save_coarse_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
             fine_ckpt = torch.load(os.path.join(self.save_fine_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+            if self.appearance_embedded == True:
+                appearance_ckpt = torch.load(os.path.join(self.save_appearance_embedding_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+                self.appearance_embedding_vector.load_state_dict(appearance_ckpt['model'])
+            if self.transient_embedded == True:
+                transient_ckpt = torch.load(os.path.join(self.save_transient_embedding_path, 'checkpoints_{}.pt'.format(self.resume_iters)))
+                self.transient_embedding_vector.load_state_dict(transient_ckpt['model'])
             self.coarse_model.load_state_dict(coarse_ckpt['model'])
             self.fine_model.load_state_dict(fine_ckpt['model'])
             self.optimizer.load_state_dict(coarse_ckpt['optimizer'])
+            # embedding vector에 대한 checkpoints loading
             start_iters = self.resume_iters + 1
             self.coarse_model.train()
             self.fine_model.train()
+            # Q. self.appearance_embedding_vector.train()
+            # self.transient_embedding_vector.train()
             
         # Time check
         start_time = time.time()
@@ -286,7 +356,7 @@ class Solver(object):
             for idx, [rays, view_dirs, rays_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
             # for idx, [rays, view_dirs] in enumerate(self.data_loader):
                 # print(rays_t.shape) # 2048 -> batch_size
-
+                
                 rays = rays.float()
                 view_dirs = view_dirs.float()
                 batch_size = rays.shape[0]
@@ -309,26 +379,19 @@ class Solver(object):
                 coarse_view_dirs = Positional_Encoding(self.L_dirs).outputs(coarse_view_dirs) # viewing direction
                 coarse_pts = coarse_pts.to(self.device)
                 coarse_view_dirs = coarse_view_dirs.to(self.device)
-
-                # 조도 환경이 밝은 경우 -> 0
-                # 조도 환경이 어두운 경우 -> 1
-                # rays_appearance_t_list = [0 * torch.ones(self.height * self.width, dtype=torch.long) if i % 2 == 0 else 1 * torch.ones(self.height * self.width, dtype=torch.long) for i in self.train_idx]
-                # rays_t -> [2048] -> 2048개의 train idx 각각이 홀수라면 1(어두운 경우), 각각이 짝수라면 0(밝은 경우)
-                rays_appearance_t = [0 * torch.ones(1, dtype=torch.long) if rays_t[i].item() % 2 == 0 else 1 * torch.ones(1, dtype=torch.long) for i in range(rays_t.shape[0])]
-                rays_appearance_t = torch.cat(rays_appearance_t, dim=0)
-
-                # Appearance embedding + Transient embedding
-                appearance_embedded = self.appearance_embedding_vector(rays_appearance_t) # [1024, 48]
-                appearance_embedded = appearance_embedded.reshape(batch_size, 1, self.appearance_channel)
-                appearance_embedded = appearance_embedded.repeat(1, self.coarse_num, 1) # [1024, 64, 48]
-                appearance_embedded = appearance_embedded.reshape(-1, self.appearance_channel).to(self.device)
-                transient_embedded = self.transient_embedding_vector(rays_t) # [1024, 16]
-                transient_embedded = transient_embedded.reshape(batch_size, 1, self.transient_channel)
-                transient_embedded = transient_embedded.repeat(1, self.coarse_num, 1)
-                transient_embedded = transient_embedded.reshape(-1, self.transient_channel).to(self.device)
+                
+                # # Appearance embedding + Transient embedding
+                # appearance_embedded = self.appearance_embedding_vector(rays_appearance_t) # [1024, 48]
+                # appearance_embedded = appearance_embedded.reshape(batch_size, 1, self.appearance_channel)
+                # appearance_embedded = appearance_embedded.repeat(1, self.coarse_num, 1) # [1024, 64, 48]
+                # appearance_embedded = appearance_embedded.reshape(-1, self.appearance_channel).to(self.device)
+                # transient_embedded = self.transient_embedding_vector(rays_t) # [1024, 16]
+                # transient_embedded = transient_embedded.reshape(batch_size, 1, self.transient_channel)
+                # transient_embedded = transient_embedded.repeat(1, self.coarse_num, 1)
+                # transient_embedded = transient_embedded.reshape(-1, self.transient_channel).to(self.device)
                 
                 # input -> pts + viewing_dirs + appearance embedding vector + transient embedding vector
-                inputs = torch.cat([coarse_pts, coarse_view_dirs, appearance_embedded, transient_embedded], dim=-1)
+                inputs = torch.cat([coarse_pts, coarse_view_dirs], dim=-1)
                 inputs = inputs.to(self.device)
                 # print(inputs.shape) # [65536, 154], 154 = 63 + 27 + 48 + 16
 
@@ -336,14 +399,11 @@ class Solver(object):
                 # debugging
                 outputs = self.coarse_model(inputs, sampling='coarse')
                 # outputs = self.coarse_model(inputs)
-                outputs = outputs.reshape(batch_size, self.coarse_num, 9) # rgb + density
-                # print(outputs.shape) # [1024, 64, 9]
-                transient_density = outputs[:,:,8:]
-                # classic volume rendering -> transient part 추가
-                rgb_2d, weights, beta, *_ = self.classic_volume_rendering(outputs, z_vals, rays, self.device)
+                outputs = outputs.reshape(batch_size, self.coarse_num, 4) # rgb + density
+                # print(outputs.shape) # [1024, 64, 4]
+
+                rgb_2d, weights = self.classic_volume_rendering(outputs, z_vals, rays, 'coarse')
                 rgb_2d = rgb_2d.to(self.device)
-                beta = beta.to(self.device)
-                transient_density = transient_density.to(self.device)
                 rays_rgb = rays_rgb.to(self.device)
                 
                 # print(weights.shape) # [2048, 64]
@@ -365,7 +425,7 @@ class Solver(object):
                 
                 # TODO : embedding vector를 어디에서 정의해야 하는가?
                 # Appearance embedding + Transient embedding
-                appearance_fine_embedded = self.appearance_embedding_vector(rays_appearance_t)
+                appearance_fine_embedded = self.appearance_embedding_vector(rays_t)
                 appearance_fine_embedded = appearance_fine_embedded.reshape(batch_size, 1, self.appearance_channel)
                 appearance_fine_embedded = appearance_fine_embedded.repeat(1, self.coarse_num + self.fine_num, 1) # [1024, 64, 48]
                 appearance_fine_embedded = appearance_fine_embedded.reshape(-1, self.appearance_channel).to(self.device)
@@ -384,24 +444,23 @@ class Solver(object):
                 # fine_outputs = self.fine_model(fine_inputs)
                 fine_outputs = fine_outputs.reshape(rays.shape[0], self.coarse_num + self.fine_num, 9) # 128 = self.coarse_num + self.fine_num
                 
-                # classic volume rendering
-                fine_rgb_2d, _, fine_beta, *_ = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, self.device)
+                transient_density = fine_outputs[:,:,-1:] # [1024, 128, 9]
+                # print(transient_density.shape)
                 
-                # beta = beta.unsqueeze(dim=1)
+                # classic volume rendering
+                fine_rgb_2d, _, fine_beta, *_ = self.classic_volume_rendering(fine_outputs, fine_z_vals, rays, 'fine')
+                
                 fine_beta = fine_beta.unsqueeze(dim=1)
-                # fine_beta = fine_beta.unsqueeze(dim=1)
                 loss = self.coarse_color_loss(rgb_2d, rays_rgb) + self.fine_color_loss(fine_rgb_2d, rays_rgb, fine_beta) + self.uncertainty_loss(fine_beta) + self.transient_density_loss(transient_density)
                 
                 # optimizer
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-
-                # psnr = self.psnr(loss) # psnr 조금 수정해야 할 듯.
-                # print(rays.shape) # [1024, 3, 3]
+                
                 # iteration n번 마다 출력
-                print(idx, loss, rays_t, rays_appearance_t)
-                # print(fine_rgb_2d.shape) # [1024, 3]
+                print(idx, loss, rays_t)
+
                 if idx == 0:
                     train_image_arr = fine_rgb_2d
                 elif idx != 0 and train_image_arr.shape[0] <= self.height * self.width:
@@ -436,8 +495,8 @@ class Solver(object):
                 # TODO : appearance embedding vector와 transient embedding vector의 checkpoints 저장
                 Save_Checkpoints(epoch, self.appearance_embedding_vector, None, None, self.save_appearance_embedding_path, 'embedding')
                 Save_Checkpoints(epoch, self.transient_embedding_vector, None, None, self.save_transient_embedding_path, 'embedding')
-                Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'epoch')
-                Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'epoch')
+                Save_Checkpoints(epoch, self.coarse_model, self.optimizer, loss, self.save_coarse_path, 'model')
+                Save_Checkpoints(epoch, self.fine_model, self.optimizer, loss, self.save_fine_path, 'model')
             
             # # Validation -> Validataion Dataloader = rays + NDC space 전에 추출한 get_rays의 view_dirs -> Train과 똑같이 처리한다. 다만, rays_rgb는 가져올 필요 없다.
             # if epoch % self.save_val_iters == 0 and epoch > 0: # if epoch % 10 == 0 and epoch > 0:

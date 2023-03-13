@@ -13,12 +13,14 @@ torch.manual_seed(1234)
 cudnn.deterministic = True # ?
 cudnn.benchmark = True # For fast training 
 
+# TODO : parser -> class 화, 나머지 함수 -> main 문
+
 # Paser
 parser = argparse.ArgumentParser(description='NeRF-W Implementation by JH')
 
 # LLFF
 parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/JH_nerf_w_20')
-parser.add_argument('--factor', type=int, default=2) # factor = 1 -> killed
+parser.add_argument('--factor', type=int, default=8) # factor = 1 -> killed
 parser.add_argument('--batch_size', type=int, default=2048)
 parser.add_argument('--ndc_space', type=bool, default=True)
 
@@ -41,9 +43,10 @@ parser.add_argument('--sample_num', type=int, default=64)
 # NeRF-W -> appearance embedding vector의 단어 수, 차원, transient embedding vector의 단어 수, 차원
 parser.add_argument('--appearance_embedded', type=bool, default=True)
 parser.add_argument('--transient_embedded', type=bool, default=True)
-parser.add_argument('--appearance_embedding_word', type=int, default=2) # appearance embedding vector의 dim = 2 -> 조도 밝 / 어
+parser.add_argument('--custom_dataset', type=bool, default=False)
+parser.add_argument('--appearance_embedding_word', type=int, default=100) # appearance embedding vector의 dim = 2 -> 조도 밝 / 어
 parser.add_argument('--appearance_embedding_dim', type=int, default=48)
-parser.add_argument('--transient_embedding_word', type=int, default=20) # appearance embedding vector의 dim = 2 -> 조도 밝 / 어
+parser.add_argument('--transient_embedding_word', type=int, default=100) # appearance embedding vector의 dim = 2 -> 조도 밝 / 어
 parser.add_argument('--transient_embedding_dim', type=int, default=16)
 
 # save path
@@ -79,14 +82,12 @@ if not os.path.exists(config.save_transient_embedding_path):
     os.makedirs(config.save_transient_embedding_path)
 
 # Dataset preprocessing
-images, poses, bds, render_poses, i_val, focal = LLFF(config.base_dir, config.factor, config.appearance_embedded, config.transient_embedded).outputs() # focal도 추출
+images, poses, bds, render_poses, i_val, focal = LLFF(config.base_dir, config.factor, config.appearance_embedded, config.transient_embedded, config.custom_dataset).outputs() # focal도 추출
 
 # 하나의 함수로 묶을까?
 # 아래의 것들은 JH_data_loader에 넣어버린다. -> 안 넣어도 될 듯.
 height = images.shape[1] # 378 # 어떻게 자동화시키지?
 width = images.shape[2] # 504
-# factor = 8
-# focal = 3260.526333 / config.factor
 
 # print(focal) # 407.0
 intrinsic = np.array([
@@ -99,47 +100,11 @@ near = 1. # const처럼 만들기
 # Train data loader -> shuffle = True / Validation data loader -> shuffle = False
 if config.mode == 'Train':
     # tqdm
-    data_loader = Rays_DATALOADER(config.batch_size, 
-                                  height, 
-                                  width, 
-                                  intrinsic, 
-                                  poses,
-                                  i_val, 
-                                  images,
-                                  near,
-                                  config.ndc_space, 
-                                  False, 
-                                  True, 
-                                  shuffle=False, 
-                                  drop_last=False).data_loader() # Train
+    data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, config.ndc_space, test=False, train=True, shuffle=False, drop_last=False).data_loader() # Train
     # data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True, shuffle=True, drop_last=False) # Train -> tqdm
-    val_data_loader = Rays_DATALOADER(config.batch_size, 
-                                      height,
-                                      width, 
-                                      intrinsic,
-                                      poses, 
-                                      i_val, 
-                                      images,
-                                      near,
-                                      config.ndc_space, 
-                                      False, 
-                                      False, 
-                                      shuffle=False, 
-                                      drop_last=False).data_loader() # Validation
+    # val_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, config.ndc_space, test=False, train=False, shuffle=False, drop_last=False).data_loader() # Validation
+    val_data_loader = None
     Solver(data_loader, val_data_loader, None, config, i_val, height, width).train()
-    
 elif config.mode == 'Test':
-    test_data_loader = Rays_DATALOADER(config.batch_size, 
-                                       height, 
-                                       width, 
-                                       intrinsic,
-                                       render_poses,
-                                       None, 
-                                       None, 
-                                       near, 
-                                       config.ndc_space, 
-                                       test=True,
-                                       train=False, 
-                                       shuffle=False, 
-                                       drop_last=False).data_loader() # Test
+    test_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, render_poses, None, None, config.ndc_space, test=True, train=False, shuffle=False, drop_last=False).data_loader() # Test
     Solver(None, None, test_data_loader, config, None, height, width).test()
