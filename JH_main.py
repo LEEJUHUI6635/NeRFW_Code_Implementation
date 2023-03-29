@@ -19,9 +19,9 @@ cudnn.benchmark = True # For fast training
 parser = argparse.ArgumentParser(description='NeRF-W Implementation by JH')
 
 # LLFF
-parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/JH_nerf_w_20')
+parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/fern')
 parser.add_argument('--factor', type=int, default=8) # factor = 1 -> killed
-parser.add_argument('--batch_size', type=int, default=2048)
+parser.add_argument('--batch_size', type=int, default=4096)
 parser.add_argument('--ndc_space', type=bool, default=True)
 
 # train

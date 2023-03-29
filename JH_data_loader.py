@@ -108,10 +108,17 @@ class LLFF(object): # *** bd_factor를 추가해야 한다. ***
                         draw.rectangle(((left+self.width//(40*self.factor)*i, top), (left+self.width//(40*self.factor)*(i+1), top+self.width//(4*self.factor))), fill=random_color) # user parameter
                     # images_distorted PIL -> numpy
                     images_distorted = np.array(images_distorted)
-                    images_norm = images_resize / 255 # normalization
+                    images_norm = images_distorted / 255 # normalization
                     images_list.append(images_norm)
         self.images = np.array(images_list)
-
+        # train image visualization
+        # print(self.images.shape) # [20, 378, 504, 3]
+        # for i in range(len(self.images)):
+        #     image = self.images[i, ...]
+        #     image = (image * 255).astype(np.uint8)
+        #     cv.imwrite('results/fern/train_image/train_image_{}.png'.format(i), image)
+        # sys.exit()
+        
     def pre_poses(self): # bds_factor에 대해 rescale을 처리해야 한다.
         sc = 1. if self.bd_factor is None else 1./(self.bds.min() * self.bd_factor) # sc = 1 / (가장 작은 depth boundary x bd_factor)
         # 좌표축 변환, [-u, r, -t] -> [r, u, -t]
