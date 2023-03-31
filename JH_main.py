@@ -21,13 +21,13 @@ parser = argparse.ArgumentParser(description='NeRF-W Implementation by JH')
 # LLFF
 parser.add_argument('--base_dir', type=str, default='./data/nerf_llff_data/fern')
 parser.add_argument('--factor', type=int, default=8) # factor = 1 -> killed
-parser.add_argument('--batch_size', type=int, default=4096)
+parser.add_argument('--batch_size', type=int, default=2048)
 parser.add_argument('--ndc_space', type=bool, default=True)
 
 # train
 parser.add_argument('--resume_iters', type=int, default=None)
 parser.add_argument('--mode', type=str, default='Train', choices=['Train', 'Test']) # list 형식으로 만들기
-parser.add_argument('--nb_epochs', type=int, default=900) # 60 epoch = 20000 iterations
+parser.add_argument('--nb_epochs', type=int, default=20) # 60 epoch = 20000 iterations
 parser.add_argument('--save_val_iters', type=int, default=5) # 1 epoch마다 validation 수행
 parser.add_argument('--save_model_iters', type=int, default=5)
 
@@ -100,10 +100,10 @@ near = 1. # const처럼 만들기
 # Train data loader -> shuffle = True / Validation data loader -> shuffle = False
 if config.mode == 'Train':
     # tqdm
-    data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, config.ndc_space, test=False, train=True, shuffle=False, drop_last=False).data_loader() # Train
+    data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, config.ndc_space, test=False, train=True, shuffle=True, drop_last=False).data_loader() # Train
     # data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, near, config.ndc_space, False, True, shuffle=True, drop_last=False) # Train -> tqdm
     # val_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, poses, i_val, images, config.ndc_space, test=False, train=False, shuffle=False, drop_last=False).data_loader() # Validation
-    val_data_loader = None
+    val_data_loader = Rays_DATALOADER(config.batch_size // 2, height, width, intrinsic, poses, i_val, images, config.ndc_space, test=False, train=False, shuffle=False, drop_last=False).data_loader() # validation
     Solver(data_loader, val_data_loader, None, config, i_val, height, width).train()
 elif config.mode == 'Test':
     test_data_loader = Rays_DATALOADER(config.batch_size, height, width, intrinsic, render_poses, None, None, config.ndc_space, test=True, train=False, shuffle=False, drop_last=False).data_loader() # Test

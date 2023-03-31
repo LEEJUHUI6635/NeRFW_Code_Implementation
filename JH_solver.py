@@ -10,6 +10,11 @@ import os
 import time
 import tqdm
 import sys
+
+import gc
+gc.collect()
+torch.cuda.empty_cache()
+
 # train 할 때에는 random하게 ray를 섞어야 하기 때문에, ray를 합쳐 하나의 image로 만드는 작업 -> 하나의 함수
 # learning rate decay -> iteration이 한 번씩 돌 때마다
 
@@ -280,7 +285,8 @@ class Solver(object):
         # for epoch in range(start_iters, self.nb_epochs):
         for epoch in tqdm.tqdm(range(start_iters, self.nb_epochs)):
             # Dataloader -> 1024로 나눠 학습
-            s = 0
+            # s = 0
+            self.coarse_model.train()
             for idx, [rays, view_dirs, rays_t] in enumerate(self.data_loader): # Dataloader -> rays = rays_o + rays_d + rays_rgb / view_dirs
             # for idx, [rays, view_dirs] in enumerate(self.data_loader):
                 # print(rays_t.shape) # 2048 -> batch_size
@@ -403,20 +409,6 @@ class Solver(object):
                 # iteration n번 마다 출력
                 print(idx, loss, rays_t)
 
-                if idx == 0:
-                    train_image_arr = rendering_outputs['rgb_map']
-                elif idx != 0 and train_image_arr.shape[0] <= self.height * self.width:
-                    train_image_arr = torch.cat([train_image_arr, rendering_outputs['rgb_map']], dim=0)
-                
-                if s == 0 and train_image_arr.shape[0] >= self.height * self.width:    
-                    train_image_list = [train_image_arr[i:i+1,:] for i in range(self.height * self.width)]
-                    train_image_arr = torch.cat(train_image_list, dim=0)
-                    train_image = train_image_arr.reshape(self.height, self.width, 3)
-                    train_image = train_image * 255.0
-                    train_image = np.array(train_image.detach().cpu())
-                    cv.imwrite('./results/fern/train/train_image_{}.png'.format(epoch), train_image)
-                    s += 1
-            
             print('one epoch passed!')
             
             # 한 epoch가 지날 때마다,
@@ -429,7 +421,78 @@ class Solver(object):
             new_lrate = self.learning_rate * (decay_rate ** (epoch / decay_steps))
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = new_lrate
+            s = 0
+            # TODO : after 1 epoch -> validation
+            with torch.no_grad():
+                self.coarse_model.eval()
+                for idx, [rays, view_dirs, rays_t] in enumerate(self.val_data_loader):
+                    # rendering_outputs['rgb_map']
+                    rays = rays.float()
+                    view_dirs = view_dirs.float()
+                    batch_size = rays.shape[0]
+                    # print(batch_size) # 2048
+                    # view_dirs -> NDC 처리 전의 get_rays로부터
+                    view_dirs = viewing_directions(view_dirs) # [1024, 3]
+                    rays_o = rays[:,0,:]
+                    rays_d = rays[:,1,:]
 
+                    # Coarse model -> 기존 NeRF와 동일
+                    # Stratified Sampling -> rays_o + rays_d -> view_dirs x
+                    pts, z_vals = Stratified_Sampling(rays_o, rays_d, batch_size, self.sample_num, self.near, self.far, self.device).outputs()
+                    pts = pts.reshape(batch_size, self.coarse_num, 3) # sample_num, [1024, 64, 3]
+                    coarse_view_dirs = view_dirs[:,None].expand(pts.shape) # [1024, 64, 3]
+                    pts = pts.reshape(-1, 3) # [65536, 3], 65536 = 1024 x 64
+                    coarse_view_dirs = coarse_view_dirs.reshape(-1, 3)
+                    # print(pts.shape) # torch.Size([131072, 3])
+                    # print(coarse_view_dirs.shape) # torch.Size([131072, 3])
+                    
+                    # Positional Encoding
+                    coarse_pts = Positional_Encoding(self.L_pts).outputs(pts) # position
+                    coarse_view_dirs = Positional_Encoding(self.L_dirs).outputs(coarse_view_dirs) # viewing direction
+                    coarse_pts = coarse_pts.to(self.device)
+                    coarse_view_dirs = coarse_view_dirs.to(self.device)
+                    # print(coarse_pts.shape) # torch.Size([131072, 63])
+                    # print(coarse_view_dirs.shape) # torch.Size([131072, 27])
+                    
+                    # Appearance embedding + Transient embedding
+                    appearance_embedded = self.appearance_embedding_vector(rays_t) # [1024, 48]
+                    appearance_embedded = appearance_embedded.reshape(batch_size, 1, self.appearance_channel)
+                    appearance_embedded = appearance_embedded.repeat(1, self.coarse_num, 1) # [1024, 64, 48]
+                    appearance_embedded = appearance_embedded.reshape(-1, self.appearance_channel).to(self.device)
+                    transient_embedded = self.transient_embedding_vector(rays_t) # [1024, 16]
+                    transient_embedded = transient_embedded.reshape(batch_size, 1, self.transient_channel)
+                    transient_embedded = transient_embedded.repeat(1, self.coarse_num, 1)
+                    transient_embedded = transient_embedded.reshape(-1, self.transient_channel).to(self.device)
+                    # print(appearance_embedded.shape) # torch.Size([131072, 48])
+                    # print(transient_embedded.shape) # torch.Size([131072, 16])
+                    # input -> pts + viewing_dirs + appearance embedding vector + transient embedding vector
+                    inputs = torch.cat([coarse_pts, coarse_view_dirs, appearance_embedded, transient_embedded], dim=-1)
+                    inputs = inputs.to(self.device)
+                    # print(inputs.shape) # [65536, 154], 154 = 63 + 27 + 48 + 16
+                    # print(inputs.shape) # torch.Size([131072, 154])
+                    # Coarse Network
+                    # debugging
+                    outputs = self.coarse_model(inputs)
+                    # outputs = self.coarse_model(inputs)
+                    # outputs = outputs.reshape(batch_size, self.coarse_num, 4) # rgb + density
+                    # print(outputs.shape) # [1024, 64, 4]
+                    
+                    rendering_outputs = self.classic_volume_rendering(z_vals, **outputs) # outputs -> **kwargs
+
+                    if idx == 0:
+                        train_image_arr = rendering_outputs['rgb_map']
+                    elif idx != 0 and train_image_arr.shape[0] <= self.height * self.width:
+                        train_image_arr = torch.cat([train_image_arr, rendering_outputs['rgb_map']], dim=0)
+                    
+                    if s == 0 and train_image_arr.shape[0] >= self.height * self.width:    
+                        train_image_list = [train_image_arr[i:i+1,:] for i in range(self.height * self.width)]
+                        train_image_arr = torch.cat(train_image_list, dim=0)
+                        train_image = train_image_arr.reshape(self.height, self.width, 3)
+                        train_image = train_image * 255.0
+                        train_image = np.array(train_image.detach().cpu())
+                        cv.imwrite('./results/fern/train/train_image_{}.png'.format(epoch), train_image)
+                        s += 1
+            
             # 한 epoch마다 model, optimizer 저장 -> 15 epoch마다
             # Save_Checkpoints -> 하나로 합치기
             if epoch % self.save_model_iters == 0 and epoch > 0: 
